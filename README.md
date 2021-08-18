@@ -1,4 +1,18 @@
 # GTA V LSTM
+
+
+# Demo
+Here i disabled traffic and let the model drive, keep in mind that it has been trained to drive fast and overtake (4x sped up):  
+![alt text][gif1]  
+  
+This and the above gif cover a large part of the highway around the whole map.  
+In this particular drive the model only crashed once at the very end.  
+![alt text][gif2]  
+  
+This is with traffic enabled, the model tries to overtake and not crash. I inluded some crashes to show how it reacts (2x sped up):  
+![alt text][gif3]  
+
+
 # Model
 This project combines a CNN, which is used as a feature extractor  
 with an LSTM. The CNN is an on image net pretrained imported network, like  
@@ -29,17 +43,6 @@ You can of course change this, or even should if you want to use the code for a 
 Some parts of this project (like the screen capture, key input and similar) are from  
 this sentdex tutorial:  
 https://github.com/Sentdex/pygta5
-
-# Demo
-Here i disabled traffic and let the model drive, keep in mind that it has been trained to drive fast and overtake (4x sped up):  
-![alt text][gif1]  
-  
-This and the above gif cover a large part of the highway around the whole map.  
-In this particular drive the model only crashed once at the very end.  
-![alt text][gif2]  
-  
-This is with traffic enabled, the model tries to overtake and not crash. I inluded some crashes to show how it reacts (2x sped up):  
-![alt text][gif3]  
 
 # Conlusions
 Before this i had tried to train my own model based on sentdex' tutorial, where the model was only a CNN.  
