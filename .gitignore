@@ -1,0 +1,6 @@
+*.npy
+logs/
+data_in_chunks_temp/
+models/
+__pycache__/
+.idea/
