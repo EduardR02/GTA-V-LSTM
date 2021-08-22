@@ -25,7 +25,7 @@ current_file_name = file_name_10
 huge_dataset_filename = "training_data_full_lstm_unshuffled_less_balanced_1.npy"
 training_data = []
 
-
+monitor = {'top': 27, 'left': 0, 'width': 800, 'height': 600}
 w = [1, 0, 0, 0, 0, 0]
 a = [0, 1, 0, 0, 0, 0]
 s = [0, 0, 1, 0, 0, 0]
@@ -73,7 +73,6 @@ def main(only_fps_test_mode=False):     # check training data on start of file b
     n = 1
     t = time.time()
     sct = mss.mss()
-    monitor = {'top': 27, 'left': 0, 'width': 800, 'height': 600}
     while True:
         if not paused:
             if only_fps_test_mode:

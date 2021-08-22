@@ -8,8 +8,9 @@ from keys import PressKey, ReleaseKey, W, A, S, D
 from training import height, width, color_channels, model_name, sequence_len
 from tensorflow.keras.backend import clear_session
 from tensorflow import compat
-from collect_training_data import w, wa, wd, s, a, d, key_check
-from keras.models import load_model
+from tensorflow.keras.models import load_model
+from collect_training_data import w, wa, wd, s, a, d, key_check, monitor
+from lenet import create_neural_net
 
 threshold_turn = 0
 t_time = 0
@@ -113,7 +114,7 @@ def show_screen():
     sct = mss.mss()
     monitor = {'top': 27, 'left': 0, 'width': 800, 'height': 600}
     while 1:
-        img = np.asarray(sct.grab(monitor))
+        img = np.asarray(sct.grab(monitor))     # output is bgra
         # no need to convert color as cv2 displays bgr as rgb, capture is in bgr
         cv2.imshow('Car View RGB', img)
         if cv2.waitKey(25) & 0xFF == ord('q'):
@@ -130,15 +131,15 @@ def main_with_lstm():
     net = load_model(model_name)
     print("Model took:", time.time() - t, "to load.")
     net.summary()
+    sct = mss.mss()
     counter = 0
     t = time.time()
-    offset = 25
     images = []
     while 1:
         counter += 1
         # noinspection PyTypeChecker
-        img = grab_screen(region=(0, 0 + offset, 800, 600 + offset))
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)      # for rgb, depends on training data, lstm trained on rgb
+        img = np.asarray(sct.grab(monitor))     # in bgra format
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
         # cv2 in comparison to keras uses width, height order
         img = cv2.resize(img, (width, height))
         img = img.reshape(-1, height, width, color_channels)
@@ -159,14 +160,10 @@ def main_with_lstm():
             prediction = np.argmax(prediction_distribution, axis=-1)  # get output of last image
             # press predicted keys and display prediction
             output_key(prediction, prediction_distribution)
-            # remove some last pictures
-            # images = images[5:]
         if (time.time() - t) >= 1:
             print("fps:", counter)
             counter = 0
             t = time.time()
-        # print(time.time() - t)
-        # print("fps: {}".format(1 / (time.time() - t)))
         key = key_check()
         if "T" in key:
             release_all()

@@ -11,8 +11,8 @@ def grab_screen(region=None):
 
     if region:
         left, top, x2, y2 = region
-        width = x2 - left + 1
-        height = y2 - top + 1
+        width = x2 - left
+        height = y2 - top
     else:
         width = win32api.GetSystemMetrics(win32con.SM_CXVIRTUALSCREEN)
         height = win32api.GetSystemMetrics(win32con.SM_CYVIRTUALSCREEN)

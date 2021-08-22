@@ -13,14 +13,15 @@ def create_neural_net(height, width, lr, color_channels, sequence_length):
     np.random.seed(1000)
 
     inputs = Input(shape=(sequence_length, height, width, color_channels))
-    cnn = InceptionV3(weights="imagenet", include_top=False, pooling="avg", input_shape=(height, width, color_channels))
+    cnn = EfficientNetB3(weights="imagenet", include_top=False, pooling="avg", input_shape=(height, width, color_channels))
     cnn = Model(inputs=cnn.input, outputs=cnn.layers[-1].output)
     # cnn.trainable = False
     x = TimeDistributed(cnn)(inputs)
     x = TimeDistributed(Flatten())(x)
 
-    x = LSTM(256, input_shape=(sequence_length, (height, width, color_channels)), return_sequences=True)(x)
+    x = LSTM(512, input_shape=(sequence_length, (height, width, color_channels)), return_sequences=True)(x)
     x = LSTM(128, return_sequences=False)(x)
+    x = Dropout(0.3)(x)
 
     outputs = Dense(6, activation="softmax")(x)
     model = Model(inputs, outputs)
@@ -30,7 +31,7 @@ def create_neural_net(height, width, lr, color_channels, sequence_length):
     return model
 
 
-if __name__ == "__main__":
+def test_model_speed():
     name = "car_2_inception_and_lstm_normalized_more_dropout"
     my_model = load_model(name)
     my_model.summary()
@@ -48,5 +49,18 @@ if __name__ == "__main__":
     print(x)
     print("Model took:", time.time() - t)
     print("x output shape is:", x.shape)
+
+
+def save_untrained_model():
+    name = "model_for_eff_net_test_fps"
+    seq_len = 30
+    model = create_neural_net(120, 160, 5e-5, 3, seq_len)
+    model.summary()
+    model.save(name)
+
+
+if __name__ == "__main__":
+    save_untrained_model()
+
 
 
