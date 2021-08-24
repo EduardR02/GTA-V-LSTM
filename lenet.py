@@ -9,13 +9,18 @@ from tensorflow.keras.models import load_model
 
 
 # height first, then width is keras order
-def create_neural_net(height, width, lr, color_channels, sequence_length):
+def create_neural_net(height, width, lr, color_channels, sequence_length, load_pretrained_cnn=False, model_name=""):
     np.random.seed(1000)
-
     inputs = Input(shape=(sequence_length, height, width, color_channels))
-    cnn = EfficientNetB3(weights="imagenet", include_top=False, pooling="avg", input_shape=(height, width, color_channels))
-    cnn = Model(inputs=cnn.input, outputs=cnn.layers[-1].output)
-    # cnn.trainable = False
+    if load_pretrained_cnn:
+        if model_name == "": raise ValueError("model_name cannot be empty")
+        cnn = load_model(model_name)
+        # strips cnn of everything but inception with 2048 avgpool output, layers[...] is where that layer is
+        cnn = Model(inputs=cnn.layers[1].input, outputs=cnn.layers[1].output)
+    else:
+        cnn = InceptionV3(weights="imagenet", include_top=False, pooling="avg", input_shape=(height, width, color_channels))
+        cnn = Model(inputs=cnn.input, outputs=cnn.output)
+    # cnn.trainable = False     # testing
     x = TimeDistributed(cnn)(inputs)
     x = TimeDistributed(Flatten())(x)
 
@@ -26,9 +31,21 @@ def create_neural_net(height, width, lr, color_channels, sequence_length):
     outputs = Dense(6, activation="softmax")(x)
     model = Model(inputs, outputs)
     optimizer = Adam(learning_rate=lr)
-    model.compile(loss='categorical_crossentropy', optimizer=optimizer,
-                  metrics=['accuracy'])
+    model.compile(loss='categorical_crossentropy', optimizer=optimizer, metrics=['accuracy'])
     return model
+
+
+def create_cnn_only(height, width, lr, color_channels):
+    np.random.seed(1000)
+    inputs = Input(shape=(height, width, color_channels))
+    cnn = InceptionV3(weights="imagenet", include_top=False, pooling="avg", input_shape=(height, width, color_channels))
+    cnn = cnn(inputs)
+    cnn = Dropout(0.5)(cnn)
+    cnn = Dense(6, activation="softmax")(cnn)
+    cnn = Model(inputs=inputs, outputs=cnn)
+    optimizer = Adam(learning_rate=lr)
+    cnn.compile(loss='categorical_crossentropy', optimizer=optimizer, metrics=['accuracy'])
+    return cnn
 
 
 def test_model_speed():
@@ -60,7 +77,8 @@ def save_untrained_model():
 
 
 if __name__ == "__main__":
-    save_untrained_model()
+    cnn = create_cnn_only(120, 160, 5e-5, 3)
+    cnn.summary()
 
 
 

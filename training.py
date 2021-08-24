@@ -1,6 +1,6 @@
 import numpy as np
 import tensorflow as tf
-from lenet import create_neural_net
+from lenet import create_neural_net, create_cnn_only
 from tensorflow import compat
 import time
 from sklearn.utils import shuffle, class_weight
@@ -15,23 +15,21 @@ width = 160
 height = 120
 lr = 5e-5
 color_channels = 3
-eps = 5
+eps = 10
 model_dir_name = "models/"
-model_name = model_dir_name + "car_inception_and_lstm_fps_adjusted_v6.5.1.2_epoch_8"
+cnn_only_name = model_dir_name + "car_inception_only"
+model_name = model_dir_name + "grosofjsdfsdf_RENAME"
 load_data_name = "training_data_for_lstm_rgb_full.npy"
-sequence_len = 20
+sequence_len = 30
 output_classes = 6
-BATCH_SIZE = 24     # depends a lot on hardware, but also can be much higher if part of the model is frozen
+BATCH_SIZE = 64
 temp_data_chunk_name = "temp_dataset_chunk_"
 temp_data_folder_name = "data_in_chunks_temp"
-# around 80 for me depending on population density in game
 fps_at_recording_time = 80      # check by using main with fps only set to true, while having the game running
-# check by running model in main, i get about about 9 - 10,
-# has to be lower than recording-time-fps (else you might get division by 0. If that is the case just don't use this)
-fps_at_test_time = 9   # that might change with model architecture though (like using efficientnet over inception)
+fps_at_test_time = 9    # check by running model in main
 
 
-def train_model(load_saved, freeze=False):
+def setup_tf():
     tf.keras.backend.clear_session()
     config = compat.v1.ConfigProto()
     config.gpu_options.allow_growth = True
@@ -40,15 +38,17 @@ def train_model(load_saved, freeze=False):
     for gpu in gpus:
         tf.config.experimental.set_memory_growth(gpu, True)
 
+
+def train_model(load_saved, freeze=False, load_saved_cnn=False):
+    setup_tf()
     if load_saved:
         model = load_model(model_name)
     else:
-        model = create_neural_net(height, width, lr, color_channels, sequence_len)
+        model = create_neural_net(height, width, lr, color_channels, sequence_len, load_saved_cnn, cnn_only_name)
     # freeze convolutional model to fine tune lstm (the cnn is treated as one layer
     # make sure you freeze the correct one)
     # goes the other way around too if the model was saved frozen and you want to unfreeze
     model.layers[1].trainable = not freeze
-    # you might want to lower the learning rate and increase training epochs when frozen
     optimizer = Adam(learning_rate=lr)
     # recompile to make the changes
     model.compile(loss='categorical_crossentropy', optimizer=optimizer,
@@ -57,44 +57,58 @@ def train_model(load_saved, freeze=False):
     custom_training_loop(model, 50, 5000, True, False, keep_dir=True)
 
 
-# with the custom loop implemented this is pretty useless, as it is much worse
-def standard_training_loop(model):
-    # get data
+def train_cnn_only(load_saved):
+    setup_tf()
+    if load_saved:
+        model = load_model(cnn_only_name)
+    else:
+        model = create_cnn_only(height, width, lr, color_channels)
+    model.summary()
+    cnn_only_training(model)
+
+
+def cnn_only_training(model):
+    class_weights = get_class_weights()
     t = time.time()
     train_data = np.load(load_data_name, allow_pickle=True)
     print("Data loaded in:", time.time() - t, "seconds.")
 
-    # train_data = train_data[:len(train_data) // 3]
+    # train_data = train_data[:len(train_data) // 10]
 
     print("Training data amount:", len(train_data))
-    train = train_data[:-5000]
-    validation = train_data[-5000:-2500]
-    test = train_data[-2500:]
+
+    train = train_data[:-10000]
+    validation = train_data[-10000:-5000]
+    test = train_data[-5000:]
     # delete lists when already processed to speed everything up when memory limited
     del train_data
     t = time.time()
     # height, width is the correct reshape order!!!!!!!!!
 
-    image_data_train, label_data_train = sequence_data(train)
+    label_data_train = np.array([i[1] for i in train]).reshape((-1, output_classes))
+    image_data_train = np.array([i[0] for i in train]).reshape((-1, height, width, color_channels))
+    print(label_data_train.shape, image_data_train.shape)
     del train
-    image_data_validation, label_data_validation = sequence_data(validation)
+
+    label_data_validation = np.array([i[1] for i in validation]).reshape((-1, output_classes))
+    image_data_validation = np.array([i[0] for i in validation]).reshape((-1, height, width, color_channels))
     del validation
-    image_data_test, label_data_test = sequence_data(test)
+
+    label_data_test = np.array([i[1] for i in test]).reshape((-1, output_classes))
+    image_data_test = np.array([i[0] for i in test]).reshape((-1, height, width, color_channels))
     del test
 
     print("Data reshaped in:", time.time() - t, "seconds.")
 
     model.fit(image_data_train, label_data_train,
-              epochs=eps, batch_size=BATCH_SIZE,
+              epochs=eps, batch_size=BATCH_SIZE, class_weight=class_weights,
               validation_data=(image_data_validation, label_data_validation), shuffle=True)
     model.evaluate(image_data_test, label_data_test)
-    model.save(model_name)
+    model.save(cnn_only_name)
 
 
-# use when ram is limited
 def custom_training_loop(model, chunks, test_data_size, save_every_epoch, halfway_save, keep_dir=False):
     global lr
-    # get inverse proportions of the classes
     class_weights = get_class_weights()
     # prepare chunks and save them
     subdivide_data(load_from=load_data_name, new_dir_name=temp_data_folder_name,
@@ -102,12 +116,13 @@ def custom_training_loop(model, chunks, test_data_size, save_every_epoch, halfwa
     name_for_file_path = temp_data_folder_name + "/" + temp_data_chunk_name
     for i in range(eps):
         K.clear_session()
-        # not always useful, maybe disable it (because the optimizer should already handle this)
+        # optimizer should already handle this
+        """
         if i != 0:
             lr = lr / 2
             K.set_value(model.optimizer.learning_rate, lr)
-        # + 1 because if the test data is smaller than the chunks,
-        # the last chunk will be split into a smaller chunk and the test data, meaning there is one more file
+        """
+        # + 1 as data could be split into +1 chunk because of test data size
         for current_chunk in range(chunks + 1):
             K.clear_session()
             # check if file exists, if not this epoch is done
@@ -116,15 +131,13 @@ def custom_training_loop(model, chunks, test_data_size, save_every_epoch, halfwa
                 images, labels = sequence_data(data, shuffle_bool=True, incorporate_fps=True)
                 del data
                 print("Epoch: {}; Chunk {} out of {}".format(i, current_chunk, chunks))
-                # check if data is test data or train data,
-                # test is always last, meaning if next doesn't exists it's the test data
+                # test data is always last, meaning if next doesn't exists it's the test data
                 if os.path.isfile(name_for_file_path + str(current_chunk + 1) + ".npy"):
                     # epochs is i+1 because we want to train only one iteration, initial epoch is "starting epoch"
-                    # so if initial_epoch == epochs then it doesn't train  (just skips)
+                    # if initial_epoch == epochs then it doesn't train  (just skips)
                     model.fit(images, labels, epochs=i+1, batch_size=BATCH_SIZE,
                               class_weight=class_weights, initial_epoch=i)
                 else:
-                    # validation
                     model.evaluate(images, labels)
                 del images, labels
             else:
@@ -150,10 +163,8 @@ def sequence_data(data, shuffle_bool=True, incorporate_fps=True):
     images = data[:, 0]
     labels = data[:, 1]
     del data
-    # incorporate_fps means to take into account training time fps, as collecting data has higher fps than when
-    # the model is predicting. If inc_fps is True, the data will be approximated to test time fps
+    # approximate test time fps into training data
     if not incorporate_fps:
-        # correct length to fit sequence len
         if len(images) < sequence_len:
             raise ValueError("Not enough data, minimum length should be {}, but is {}"
                              .format(sequence_len, len(images)))
@@ -163,9 +174,7 @@ def sequence_data(data, shuffle_bool=True, incorporate_fps=True):
 
         images = np.array(res).reshape((-1, sequence_len, height, width, color_channels))
         del res
-        # need to match labels start and last image in sequence
-        # for example if seq len is 20, then first sequence end will be index 19
-        # concatenate because all labels are lists, not np arrays
+        # need to match labels to last image in sequence
         labels = np.concatenate(labels[sequence_len - 1:], axis=0).reshape((-1, output_classes))
     else:
         fps_ratio = int(round(fps_at_recording_time / fps_at_test_time))    # determines how many frames to skip
@@ -189,17 +198,16 @@ def sequence_data(data, shuffle_bool=True, incorporate_fps=True):
 
 # creates a new directory with divided dataset into smaller chunks
 def subdivide_data(load_from, new_dir_name, chunks, keep_directory, test_data_size=None):
-    # keep directory assumes the files are correct, will perform training as if they just got created, so be careful
+    # keep directory assumes the files are correct, will perform training as if they just got created
     if keep_directory and os.path.isdir(new_dir_name):
         print("Directory exists and was not changed, as specified")
         return
-    # makes it so last file is only test data
     data = np.load(load_from, allow_pickle=True)
     # data = data[:len(data) // 10]    # for testing
     name_for_file_path = new_dir_name + "/" + temp_data_chunk_name
     print("Data length:", len(data))
     print("Chunk length:", len(data) // chunks)
-    # remove directory if it exists.
+
     if os.path.isdir(new_dir_name):
         remove_subdivided_data(new_dir_name)
     try:
@@ -233,7 +241,6 @@ def remove_subdivided_data(dir_to_remove_name):
         print("Directory %s not found" % dir_to_remove_name)
 
 
-# class weights not supported on lstm rip, sample weights are though but I don't think I want to use them
 def get_inverse_proportions(data):
     print(len(data))
     x = np.sum(data, axis=0)     # sum each label for each timestep separately
@@ -255,8 +262,10 @@ def get_class_weights():
                                                             y=labels)
     inverse_proportions = dict(enumerate(inverse_proportions))
     print("Proportions:", inverse_proportions)
+    del labels
     return inverse_proportions
 
 
 if __name__ == "__main__":
-    train_model(True, True)
+    # train_model(True, True)
+    train_cnn_only(True)
