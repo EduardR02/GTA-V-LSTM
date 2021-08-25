@@ -9,7 +9,7 @@ from tensorflow.keras.models import load_model
 
 
 # height first, then width is keras order
-def create_neural_net(height, width, lr, color_channels, sequence_length, load_pretrained_cnn=False, model_name=""):
+def create_neural_net(height, width, lr, color_channels, sequence_length, output_size, load_pretrained_cnn=False, model_name=""):
     np.random.seed(1000)
     inputs = Input(shape=(sequence_length, height, width, color_channels))
     if load_pretrained_cnn:
@@ -23,25 +23,25 @@ def create_neural_net(height, width, lr, color_channels, sequence_length, load_p
     # cnn.trainable = False     # testing
     x = TimeDistributed(cnn)(inputs)
     x = TimeDistributed(Flatten())(x)
-
+    x = TimeDistributed(Dropout(0.2))(x)
     x = LSTM(512, input_shape=(sequence_length, (height, width, color_channels)), return_sequences=True)(x)
-    x = LSTM(128, return_sequences=False)(x)
-    x = Dropout(0.3)(x)
+    x = LSTM(64, return_sequences=False)(x)
+    x = Dropout(0.2)(x)
 
-    outputs = Dense(6, activation="softmax")(x)
+    outputs = Dense(output_size, activation="softmax")(x)
     model = Model(inputs, outputs)
     optimizer = Adam(learning_rate=lr)
     model.compile(loss='categorical_crossentropy', optimizer=optimizer, metrics=['accuracy'])
     return model
 
 
-def create_cnn_only(height, width, lr, color_channels):
+def create_cnn_only(height, width, lr, color_channels, output_size):
     np.random.seed(1000)
     inputs = Input(shape=(height, width, color_channels))
     cnn = InceptionV3(weights="imagenet", include_top=False, pooling="avg", input_shape=(height, width, color_channels))
     cnn = cnn(inputs)
-    cnn = Dropout(0.5)(cnn)
-    cnn = Dense(6, activation="softmax")(cnn)
+    cnn = Dropout(0.3)(cnn)
+    cnn = Dense(output_size, activation="softmax")(cnn)
     cnn = Model(inputs=inputs, outputs=cnn)
     optimizer = Adam(learning_rate=lr)
     cnn.compile(loss='categorical_crossentropy', optimizer=optimizer, metrics=['accuracy'])
@@ -71,13 +71,13 @@ def test_model_speed():
 def save_untrained_model():
     name = "model_for_eff_net_test_fps"
     seq_len = 30
-    model = create_neural_net(120, 160, 5e-5, 3, seq_len)
+    model = create_neural_net(120, 160, 5e-5, 3, seq_len, 6)
     model.summary()
     model.save(name)
 
 
 if __name__ == "__main__":
-    cnn = create_cnn_only(120, 160, 5e-5, 3)
+    cnn = create_cnn_only(120, 160, 5e-5, 3, 6)
     cnn.summary()
 
 

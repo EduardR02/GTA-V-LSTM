@@ -13,20 +13,20 @@ import shutil
 
 width = 160
 height = 120
-lr = 5e-5
+lr = 1e-4
 color_channels = 3
 eps = 10
 model_dir_name = "models/"
-cnn_only_name = model_dir_name + "car_inception_only"
+cnn_only_name = model_dir_name + "car_inception_only_3"
 model_name = model_dir_name + "grosofjsdfsdf_RENAME"
 load_data_name = "training_data_for_lstm_rgb_full.npy"
 sequence_len = 30
 output_classes = 6
-BATCH_SIZE = 64
+BATCH_SIZE = 128
 temp_data_chunk_name = "temp_dataset_chunk_"
 temp_data_folder_name = "data_in_chunks_temp"
 fps_at_recording_time = 80      # check by using main with fps only set to true, while having the game running
-fps_at_test_time = 9    # check by running model in main
+fps_at_test_time = 8    # check by running model in main
 
 
 def setup_tf():
@@ -44,7 +44,8 @@ def train_model(load_saved, freeze=False, load_saved_cnn=False):
     if load_saved:
         model = load_model(model_name)
     else:
-        model = create_neural_net(height, width, lr, color_channels, sequence_len, load_saved_cnn, cnn_only_name)
+        model = create_neural_net(height, width, lr, color_channels, sequence_len, output_classes,
+                                  load_pretrained_cnn=load_saved_cnn, model_name=cnn_only_name)
     # freeze convolutional model to fine tune lstm (the cnn is treated as one layer
     # make sure you freeze the correct one)
     # goes the other way around too if the model was saved frozen and you want to unfreeze
@@ -62,13 +63,13 @@ def train_cnn_only(load_saved):
     if load_saved:
         model = load_model(cnn_only_name)
     else:
-        model = create_cnn_only(height, width, lr, color_channels)
+        model = create_cnn_only(height, width, lr, color_channels, output_classes)
     model.summary()
     cnn_only_training(model)
 
 
 def cnn_only_training(model):
-    class_weights = get_class_weights()
+    class_weights = get_class_weights(test_data_size=10000)
     t = time.time()
     train_data = np.load(load_data_name, allow_pickle=True)
     print("Data loaded in:", time.time() - t, "seconds.")
@@ -109,7 +110,7 @@ def cnn_only_training(model):
 
 def custom_training_loop(model, chunks, test_data_size, save_every_epoch, halfway_save, keep_dir=False):
     global lr
-    class_weights = get_class_weights()
+    class_weights = get_class_weights(test_data_size=test_data_size)
     # prepare chunks and save them
     subdivide_data(load_from=load_data_name, new_dir_name=temp_data_folder_name,
                    chunks=chunks, keep_directory=keep_dir, test_data_size=test_data_size)
@@ -252,10 +253,11 @@ def get_inverse_proportions(data):
     return x
 
 
-def get_class_weights():
+def get_class_weights(test_data_size=0):
     data = np.load(load_data_name, allow_pickle=True)
     labels = data[:, 1]
     del data
+    labels = labels[:-test_data_size]
     labels = [y.index(max(y)) for y in labels]
     inverse_proportions = class_weight.compute_class_weight('balanced',
                                                             classes=np.unique(labels),
@@ -268,4 +270,4 @@ def get_class_weights():
 
 if __name__ == "__main__":
     # train_model(True, True)
-    train_cnn_only(True)
+    train_cnn_only(False)
