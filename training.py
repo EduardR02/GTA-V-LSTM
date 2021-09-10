@@ -10,23 +10,8 @@ from tensorflow.keras import backend as K
 import gc
 import os
 import shutil
-
-width = 160
-height = 120
-lr = 1e-4
-color_channels = 3
-eps = 10
-model_dir_name = "models/"
-cnn_only_name = model_dir_name + "car_inception_only_3"
-model_name = model_dir_name + "grosofjsdfsdf_RENAME"
-load_data_name = "training_data_for_lstm_rgb_full.npy"
-sequence_len = 30
-output_classes = 6
-BATCH_SIZE = 128
-temp_data_chunk_name = "temp_dataset_chunk_"
-temp_data_folder_name = "data_in_chunks_temp"
-fps_at_recording_time = 80      # check by using main with fps only set to true, while having the game running
-fps_at_test_time = 8    # check by running model in main
+import datetime
+import config
 
 
 def setup_tf():
@@ -42,15 +27,14 @@ def setup_tf():
 def train_model(load_saved, freeze=False, load_saved_cnn=False):
     setup_tf()
     if load_saved:
-        model = load_model(model_name)
+        model = load_model(config.model_name)
     else:
-        model = create_neural_net(height, width, lr, color_channels, sequence_len, output_classes,
-                                  load_pretrained_cnn=load_saved_cnn, model_name=cnn_only_name)
+        model = create_neural_net(load_pretrained_cnn=load_saved_cnn, model_name=config.cnn_only_name)
     # freeze convolutional model to fine tune lstm (the cnn is treated as one layer
     # make sure you freeze the correct one)
     # goes the other way around too if the model was saved frozen and you want to unfreeze
     model.layers[1].trainable = not freeze
-    optimizer = Adam(learning_rate=lr)
+    optimizer = Adam(learning_rate=config.lr)
     # recompile to make the changes
     model.compile(loss='categorical_crossentropy', optimizer=optimizer,
                   metrics=['accuracy'])
@@ -61,9 +45,9 @@ def train_model(load_saved, freeze=False, load_saved_cnn=False):
 def train_cnn_only(load_saved):
     setup_tf()
     if load_saved:
-        model = load_model(cnn_only_name)
+        model = load_model(config.cnn_only_name)
     else:
-        model = create_cnn_only(height, width, lr, color_channels, output_classes)
+        model = create_cnn_only()
     model.summary()
     cnn_only_training(model)
 
@@ -71,7 +55,7 @@ def train_cnn_only(load_saved):
 def cnn_only_training(model):
     class_weights = get_class_weights(test_data_size=10000)
     t = time.time()
-    train_data = np.load(load_data_name, allow_pickle=True)
+    train_data = np.load(config.load_data_name, allow_pickle=True)
     print("Data loaded in:", time.time() - t, "seconds.")
 
     # train_data = train_data[:len(train_data) // 10]
@@ -86,78 +70,74 @@ def cnn_only_training(model):
     t = time.time()
     # height, width is the correct reshape order!!!!!!!!!
 
-    label_data_train = np.array([i[1] for i in train]).reshape((-1, output_classes))
-    image_data_train = np.array([i[0] for i in train]).reshape((-1, height, width, color_channels))
+    label_data_train = np.array([i[1] for i in train]).reshape((-1, config.output_classes))
+    image_data_train = np.array([i[0] for i in train]).reshape((-1, config.height, config.width, config.color_channels))
     print(label_data_train.shape, image_data_train.shape)
     del train
 
-    label_data_validation = np.array([i[1] for i in validation]).reshape((-1, output_classes))
-    image_data_validation = np.array([i[0] for i in validation]).reshape((-1, height, width, color_channels))
+    label_data_validation = np.array([i[1] for i in validation]).reshape((-1, config.output_classes))
+    image_data_validation = np.array([i[0] for i in validation]).reshape((-1, config.height,
+                                                                          config.width, config.color_channels))
     del validation
 
-    label_data_test = np.array([i[1] for i in test]).reshape((-1, output_classes))
-    image_data_test = np.array([i[0] for i in test]).reshape((-1, height, width, color_channels))
+    label_data_test = np.array([i[1] for i in test]).reshape((-1, config.output_classes))
+    image_data_test = np.array([i[0] for i in test]).reshape((-1, config.height, config.width, config.color_channels))
     del test
 
     print("Data reshaped in:", time.time() - t, "seconds.")
 
     model.fit(image_data_train, label_data_train,
-              epochs=eps, batch_size=BATCH_SIZE, class_weight=class_weights,
+              epochs=config.eps, batch_size=config.BATCH_SIZE, class_weight=class_weights,
               validation_data=(image_data_validation, label_data_validation), shuffle=True)
     model.evaluate(image_data_test, label_data_test)
-    model.save(cnn_only_name)
+    model.save(config.cnn_only_name)
 
 
 def custom_training_loop(model, chunks, test_data_size, save_every_epoch, halfway_save, keep_dir=False):
-    global lr
+    log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1)
     class_weights = get_class_weights(test_data_size=test_data_size)
     # prepare chunks and save them
-    subdivide_data(load_from=load_data_name, new_dir_name=temp_data_folder_name,
+    subdivide_data(load_from=config.load_data_name, new_dir_name=config.temp_data_folder_name,
                    chunks=chunks, keep_directory=keep_dir, test_data_size=test_data_size)
-    name_for_file_path = temp_data_folder_name + "/" + temp_data_chunk_name
-    for i in range(eps):
+    name_for_file_path = config.temp_data_folder_name + "/" + config.temp_data_chunk_name
+    for i in range(config.eps):
         K.clear_session()
-        # optimizer should already handle this
-        """
-        if i != 0:
-            lr = lr / 2
-            K.set_value(model.optimizer.learning_rate, lr)
-        """
         # + 1 as data could be split into +1 chunk because of test data size
         for current_chunk in range(chunks + 1):
             K.clear_session()
             # check if file exists, if not this epoch is done
             if os.path.isfile(name_for_file_path + str(current_chunk) + ".npy"):
                 data = np.load(name_for_file_path + str(current_chunk) + ".npy", allow_pickle=True)
-                images, labels = sequence_data(data, shuffle_bool=True, incorporate_fps=True)
+                images, labels = sequence_data(data, shuffle_bool=False, incorporate_fps=True)
                 del data
                 print("Epoch: {}; Chunk {} out of {}".format(i, current_chunk, chunks))
                 # test data is always last, meaning if next doesn't exists it's the test data
                 if os.path.isfile(name_for_file_path + str(current_chunk + 1) + ".npy"):
                     # epochs is i+1 because we want to train only one iteration, initial epoch is "starting epoch"
                     # if initial_epoch == epochs then it doesn't train  (just skips)
-                    model.fit(images, labels, epochs=i+1, batch_size=BATCH_SIZE,
-                              class_weight=class_weights, initial_epoch=i)
+                    model.fit(images, labels, epochs=i+1, batch_size=config.BATCH_SIZE,
+                              class_weight=class_weights, initial_epoch=i, validation_split=0.1,
+                              callbacks=[tensorboard_callback], shuffle=True)
                 else:
                     model.evaluate(images, labels)
                 del images, labels
             else:
-                gc.collect()
                 break
             # save at half if one epoch takes too long
             if current_chunk == chunks // 2 and halfway_save and save_every_epoch:
-                model.save(model_name + "_epoch_" + str(i) + "_halfway")
+                model.save(config.model_name + "_epoch_" + str(i) + "_halfway")
             gc.collect()
-        if save_every_epoch: model.save(model_name + "_epoch_" + str(i))
+        if save_every_epoch: model.save(config.model_name + "_epoch_" + str(i))
         gc.collect()
-    model.save(model_name + "_fully_trained")
+    model.save(config.model_name + "_fully_trained")
     # delete temporary created chunks
-    remove_subdivided_data(temp_data_folder_name)
+    remove_subdivided_data(config.temp_data_folder_name)
 
 
 def sequence_data(data, shuffle_bool=True, incorporate_fps=True):
     res = []
-    if len(data) < sequence_len:
+    if len(data) < config.sequence_len:
         print("Too little data")
         return
     # split data for memory efficiency
@@ -166,32 +146,37 @@ def sequence_data(data, shuffle_bool=True, incorporate_fps=True):
     del data
     # approximate test time fps into training data
     if not incorporate_fps:
-        if len(images) < sequence_len:
+        if len(images) < config.sequence_len:
             raise ValueError("Not enough data, minimum length should be {}, but is {}"
-                             .format(sequence_len, len(images)))
+                             .format(config.sequence_len, len(images)))
 
-        for i in range(len(images) - sequence_len + 1):
-            res += list(images[i:i+sequence_len])    # select sequence length
+        for i in range(len(images) - config.sequence_len + 1):
+            res += list(images[i:i+config.sequence_len])    # select sequence length
 
-        images = np.array(res).reshape((-1, sequence_len, height, width, color_channels))
+        images = np.asarray(res).reshape((-1, config.sequence_len, config.height, config.width, config.color_channels))
         del res
         # need to match labels to last image in sequence
-        labels = np.concatenate(labels[sequence_len - 1:], axis=0).reshape((-1, output_classes))
+        labels = np.concatenate(labels[config.sequence_len - 1:], axis=0).reshape((-1, config.output_classes))
     else:
-        fps_ratio = int(round(fps_at_recording_time / fps_at_test_time))    # determines how many frames to skip
+        # determines how many frames to skip
+        fps_ratio = int(round(config.fps_at_recording_time / config.fps_at_test_time))
         if fps_ratio == 0: raise ValueError('Fps ratio is 0, cannot divide by 0')
-        if len(images) < sequence_len * fps_ratio:
+        if len(images) < config.sequence_len * fps_ratio:
             raise ValueError("Not enough data, minimum length should be {}, but is {}"
-                             .format(sequence_len*fps_ratio, len(images)))
+                             .format(config.sequence_len*fps_ratio, len(images)))
 
-        for i in range(len(images) - sequence_len * fps_ratio + 1):
-            res += list(images[i: i + (fps_ratio*sequence_len): fps_ratio])
+        for i in range(len(images) - config.sequence_len * fps_ratio + 1):
+            res += list(images[i: i + (fps_ratio*config.sequence_len): fps_ratio])
 
-        images = np.array(res).reshape((-1, sequence_len, height, width, color_channels))
+        images = np.asarray(res).reshape((-1, config.sequence_len, config.height, config.width, config.color_channels))
         del res
-        labels = np.concatenate(labels[(fps_ratio*sequence_len) - 1:], axis=0).reshape((-1, output_classes))
+        labels = np.concatenate(labels[(fps_ratio*config.sequence_len) - 1:], axis=0).reshape((-1, config.output_classes))
+    # use keras fit shuffle, this creates a copy -> both arrays in ram for short time
+    # also don't use if you use validation_split in fit,
+    # as it will kill the purpose (seen data as validation over multiple epochs)
     if shuffle_bool:
         images, labels = shuffle(images, labels)    # shuffle both the same way
+    gc.collect()
     print("Image array shape:", images.shape)
     print("Label array shape", labels.shape)
     return images, labels
@@ -205,7 +190,7 @@ def subdivide_data(load_from, new_dir_name, chunks, keep_directory, test_data_si
         return
     data = np.load(load_from, allow_pickle=True)
     # data = data[:len(data) // 10]    # for testing
-    name_for_file_path = new_dir_name + "/" + temp_data_chunk_name
+    name_for_file_path = new_dir_name + "/" + config.temp_data_chunk_name
     print("Data length:", len(data))
     print("Chunk length:", len(data) // chunks)
 
@@ -254,9 +239,10 @@ def get_inverse_proportions(data):
 
 
 def get_class_weights(test_data_size=0):
-    data = np.load(load_data_name, allow_pickle=True)
+    data = np.load(config.load_data_name, allow_pickle=True)
     labels = data[:, 1]
     del data
+    gc.collect()
     labels = labels[:-test_data_size]
     labels = [y.index(max(y)) for y in labels]
     inverse_proportions = class_weight.compute_class_weight('balanced',
@@ -265,9 +251,10 @@ def get_class_weights(test_data_size=0):
     inverse_proportions = dict(enumerate(inverse_proportions))
     print("Proportions:", inverse_proportions)
     del labels
+    gc.collect()
     return inverse_proportions
 
 
 if __name__ == "__main__":
-    # train_model(True, True)
-    train_cnn_only(False)
+    train_model(False, freeze=True, load_saved_cnn=True)
+    # train_cnn_only(True)

@@ -4,3 +4,4 @@ data_in_chunks_temp/
 models/
 _pycache_/
 .idea/
+*.h5

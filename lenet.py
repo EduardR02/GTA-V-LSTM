@@ -6,79 +6,72 @@ from tensorflow.keras import Model
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.layers import TimeDistributed, Flatten, Dropout
 from tensorflow.keras.models import load_model
+import config
 
 
 # height first, then width is keras order
-def create_neural_net(height, width, lr, color_channels, sequence_length, output_size, load_pretrained_cnn=False, model_name=""):
+def create_neural_net(load_pretrained_cnn=False, model_name=""):
     np.random.seed(1000)
-    inputs = Input(shape=(sequence_length, height, width, color_channels))
+    inputs = Input(shape=(config.sequence_len, config.height, config.width, config.color_channels))
     if load_pretrained_cnn:
         if model_name == "": raise ValueError("model_name cannot be empty")
         cnn = load_model(model_name)
         # strips cnn of everything but inception with 2048 avgpool output, layers[...] is where that layer is
         cnn = Model(inputs=cnn.layers[1].input, outputs=cnn.layers[1].output)
     else:
-        cnn = InceptionV3(weights="imagenet", include_top=False, pooling="avg", input_shape=(height, width, color_channels))
+        cnn = InceptionV3(weights="imagenet", include_top=False,
+                          pooling="avg", input_shape=(config.height, config.width, config.color_channels))
         cnn = Model(inputs=cnn.input, outputs=cnn.output)
     # cnn.trainable = False     # testing
     x = TimeDistributed(cnn)(inputs)
     x = TimeDistributed(Flatten())(x)
-    x = TimeDistributed(Dropout(0.2))(x)
-    x = LSTM(512, input_shape=(sequence_length, (height, width, color_channels)), return_sequences=True)(x)
-    x = LSTM(64, return_sequences=False)(x)
+    x = LSTM(256, input_shape=(config.sequence_len,
+                               (config.height, config.width, config.color_channels)), return_sequences=True)(x)
+    x = LSTM(128, return_sequences=False)(x)
     x = Dropout(0.2)(x)
 
-    outputs = Dense(output_size, activation="softmax")(x)
+    outputs = Dense(config.output_classes, activation="softmax")(x)
     model = Model(inputs, outputs)
-    optimizer = Adam(learning_rate=lr)
+    optimizer = Adam(learning_rate=config.lr)
     model.compile(loss='categorical_crossentropy', optimizer=optimizer, metrics=['accuracy'])
     return model
 
 
-def create_cnn_only(height, width, lr, color_channels, output_size):
+def create_cnn_only():
     np.random.seed(1000)
-    inputs = Input(shape=(height, width, color_channels))
-    cnn = InceptionV3(weights="imagenet", include_top=False, pooling="avg", input_shape=(height, width, color_channels))
+    inputs = Input(shape=(config.height, config.width, config.color_channels))
+    cnn = InceptionV3(weights="imagenet", include_top=False,
+                      pooling="avg", input_shape=(config.height, config.width, config.color_channels))
     cnn = cnn(inputs)
     cnn = Dropout(0.3)(cnn)
-    cnn = Dense(output_size, activation="softmax")(cnn)
+    cnn = Dense(config.output_classes, activation="softmax")(cnn)
     cnn = Model(inputs=inputs, outputs=cnn)
-    optimizer = Adam(learning_rate=lr)
+    optimizer = Adam(learning_rate=config.lr)
     cnn.compile(loss='categorical_crossentropy', optimizer=optimizer, metrics=['accuracy'])
     return cnn
 
 
 def test_model_speed():
     name = "car_2_inception_and_lstm_normalized_more_dropout"
-    my_model = load_model(name)
+    # my_model = load_model(name)
+    my_model = create_neural_net()
     my_model.summary()
-    t = time.time()
-    test_img_eff = np.random.randint(255, size=(1, 20, 120, 160, 3))
-    print(my_model.predict(test_img_eff))
-    print("Model took:", time.time() - t)
-    t = time.time()
-    test_img_eff = np.random.randint(255, size=(1, 20, 120, 160, 3))
-    print(my_model.predict(test_img_eff))
-    print("Model took:", time.time() - t)
-    t = time.time()
-    test_img_eff = np.random.randint(255, size=(1, 20, 120, 160, 3))
-    x = my_model.predict(test_img_eff)
-    print(x)
-    print("Model took:", time.time() - t)
-    print("x output shape is:", x.shape)
+    for i in range(6):
+        t = time.time()
+        my_model.predict(np.random.randint(255, size=(1, config.sequence_len, config.height,
+                                                      config.width, config.color_channels)))
+        print(time.time() - t)
 
 
 def save_untrained_model():
     name = "model_for_eff_net_test_fps"
-    seq_len = 30
-    model = create_neural_net(120, 160, 5e-5, 3, seq_len, 6)
+    model = create_neural_net()
     model.summary()
     model.save(name)
 
 
 if __name__ == "__main__":
-    cnn = create_cnn_only(120, 160, 5e-5, 3, 6)
-    cnn.summary()
+    test_model_speed()
 
 
 

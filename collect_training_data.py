@@ -7,35 +7,25 @@ import time
 import os
 import pandas as pd
 from grabkeys import key_check
-from training import width, height, sequence_data, color_channels
-import gzip
+from training import sequence_data
+import h5py
+from threading import Thread as Worker
+import config
 
-file_name_1 = "training_data_rgb.npy"
-file_name_2 = "training_data_rgb_part_2s.npy"
-file_name_3 = "training_data_rgb_part_3.npy"
-file_name_4 = "training_data_rgb_part_4.npy"
-file_name_5 = "training_data_rgb_part_5.npy"
-file_name_6 = "training_data_rgb_part_6.npy"
-final_data_name = "training_data_for_lstm_rgb_full.npy"
-file_name_7 = "training_data_rgb_part_7.npy"
-file_name_8 = "training_data_rgb_part_8.npy"
-file_name_9 = "training_data_rgb_part_9.npy"
-file_name_10 = "training_data_rgb_get_back_on_road"
-current_file_name = file_name_10
-huge_dataset_filename = "training_data_full_lstm_unshuffled_less_balanced_1.npy"
-training_data = []
+curr_file_index = 0
+gb_per_file = 2
 
 monitor = {'top': 27, 'left': 0, 'width': 800, 'height': 600}
-w = [1, 0, 0, 0, 0, 0]
-a = [0, 1, 0, 0, 0, 0]
-s = [0, 0, 1, 0, 0, 0]
-d = [0, 0, 0, 1, 0, 0]
-wa = [0, 0, 0, 0, 1, 0]
-wd = [0, 0, 0, 0, 0, 1]
+w = [1, 0, 0, 0, 0, 0, 0]
+a = [0, 1, 0, 0, 0, 0, 0]
+s = [0, 0, 1, 0, 0, 0, 0]
+d = [0, 0, 0, 1, 0, 0, 0]
+wa = [0, 0, 0, 0, 1, 0, 0]
+wd = [0, 0, 0, 0, 0, 1, 0]
+nothing = [0, 0, 0, 0, 0, 1, 0]
 
 
 def convert_output(key):
-    output = [0, 0, 0, 0]
 
     if "A" in key and "W" in key:
         output = wa
@@ -50,7 +40,7 @@ def convert_output(key):
     elif "W" in key:
         output = w
     else:
-        output = w
+        output = nothing
 
     return output
 
@@ -62,66 +52,115 @@ def start():
     print("Go!")
 
 
-# noinspection PyTypeChecker
-def main(only_fps_test_mode=False):     # check training data on start of file before running
-    global training_data
+def main(only_fps_test_mode=False):
+    global curr_file_index
+    correct_file_counter(True)  # start with new file
+    train_images = []
+    train_labels = []
     # start()
-    paused = True
-    print("starting paused")
+    paused = False
     counter = 0
     counter2 = 0
     n = 1
     t = time.time()
     sct = mss.mss()
+    key_check()
+    start()
     while True:
         if not paused:
-            if only_fps_test_mode:
-                counter += 1
-                counter2 += 1
-            img = np.asarray(sct.grab(monitor))
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            # cv2.imshow("Car View", img)
-            img = cv2.resize(img, (width, height))
-            key = key_check()
-            output = convert_output(key)
-            training_data.append([img, output])
-            """if cv2.waitKey(25) & 0xFF == ord('q'):
-                cv2.destroyAllWindows()
-                break"""
+            counter += 1
+            counter2 += 1
+            img, label = get_image_and_label(sct)
+            train_images.append(img)
+            train_labels.append(label)
 
-            if len(training_data) % 1000 == 0:
-                print(len(training_data))
-                np.save(current_file_name, training_data)
-            if only_fps_test_mode:
-                if time.time() - t >= 1:
-                    print("Current Fps:", counter2, end="; ")
-                    print("Average Fps:", counter / n)
-                    t = time.time()
-                    n += 1
-                    counter2 = 0
-
+            if len(train_labels) % 1000 == 0:
+                print(counter)
+                print("Average Fps:", counter / n)
+                if not only_fps_test_mode:
+                    # reduces fps a little for the time while saving, but without would stop loop for time of exec,
+                    # meaning gaps in the data, multiprocessing module works worse, halts execution for a short time.
+                    t1 = Worker(target=save_with_hdf5, args=(train_images[:], train_labels[:]))
+                    t1.start()
+                    train_images = []
+                    train_labels = []
+            if time.time() - t >= 1:
+                t = time.time()
+                n += 1
+                counter2 = 0
+        else:
+            time.sleep(0.1)
         key = key_check()
         if "T" in key:
             if paused:
-                paused = False
-                print("unpaused immediately")
-                # time.sleep(1)
-                # start()
+                print("unpaused")
             else:
                 # if you press pause it probably means you want to discard last x frames
-                paused = True
-                # training_data = training_data[:-300]
+                if len(train_labels) > 300 and not only_fps_test_mode:
+                    train_images = train_images[:-300]
+                    train_labels = train_labels[:-300]
+                    save_with_hdf5(train_images, train_labels)
                 print("paused")
-                time.sleep(1)
+                curr_file_index = curr_file_index + 1
+            paused = not paused
+            train_images = []
+            train_labels = []
+            time.sleep(1)
+            t = time.time()
 
 
-def display_data():
-    df = pd.DataFrame(training_data)
+def get_image_and_label(sct):
+    img = np.asarray(sct.grab(monitor))
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    # cv2.imshow("Car View", img)
+    img = cv2.resize(img, (config.width, config.height))
+    key = key_check()
+    output = convert_output(key)
+    return img, np.asarray(output)
+
+
+def correct_file_counter(called_on_start):
+    global curr_file_index
+    filename = config.new_data_dir_name + config.data_name + f"_{curr_file_index}.h5"
+    # iterate  to writable file
+    while os.path.isfile(filename) and (called_on_start or os.stat(filename).st_size > (1024 ** 3 * gb_per_file)):
+        curr_file_index = curr_file_index + 1
+        filename = config.new_data_dir_name + config.data_name + f"_{curr_file_index}.h5"
+
+
+def save_with_hdf5(data_x, data_y):
+    global curr_file_index
+    correct_file_counter(False)
+    filename = config.new_data_dir_name + config.data_name + f"_{curr_file_index}.h5"
+    # both are lists of numpy array, retain structure but make it np array
+    data_x = np.stack(data_x, axis=0)
+    data_y = np.stack(data_y, axis=0)
+    if not os.path.isfile(filename):
+        with h5py.File(filename, 'w') as hf:
+            hf.create_dataset("images", data=data_x, chunks=True,
+                              maxshape=(None, config.height, config.width, config.color_channels))
+            hf.create_dataset("labels", data=data_y, chunks=True,
+                              maxshape=(None, config.output_classes))
+    else:
+        with h5py.File(filename, 'a') as hf:
+            hf["images"].resize((hf["images"].shape[0] + data_x.shape[0]), axis=0)
+            hf["images"][-data_x.shape[0]:] = data_x
+
+            hf["labels"].resize((hf["images"].shape[0] + data_y.shape[0]), axis=0)
+            hf["labels"][-data_y.shape[0]:] = data_y
+    file_size = os.stat(filename).st_size
+    print(file_size)
+    if file_size > (1024 ** 3 * gb_per_file): curr_file_index += 1
+    return
+
+
+def display_data(data):
+    df = pd.DataFrame(data)
     print(df.head())
     print(Counter(df[1].apply(str)))
 
 
-def normalize():
+def normalize(data):
     list_wa = []
     list_w = []
     list_wd = []
@@ -129,7 +168,7 @@ def normalize():
     list_d = []
     list_a = []
 
-    for i in training_data:
+    for i in data:
         img = i[0]
         dd = i[1]
 
@@ -172,50 +211,13 @@ def normalize():
     return all_data
 
 
-def normalize_lstm():
-    global training_data
-    display_data()
-    list_res = []
-    last_skipped = 0
-    for i in training_data:
-        img = i[0]
-        dd = i[1]
-        last_label = w if len(list_res) == 0 else list_res[-1][1]
-        if dd == w:
-            if last_skipped > 2 and last_label == w:
-                list_res.append([img, dd])
-                last_skipped = 0
-            elif last_label == w:
-                last_skipped += 1
-            else:
-                list_res.append([img, dd])
-                last_skipped = 0
-        elif dd == wa:
-            list_res.append([img, dd])
-        elif dd == wd:
-            list_res.append([img, dd])
-        elif dd == a:
-            list_res.append([img, dd])
-        elif dd == s:
-            list_res.append([img, dd])
-        elif dd == d:
-            list_res.append([img, dd])
-        else:
-            print("uh oh stinky error")
-        if dd != w: last_skipped = 0
-    training_data = list_res
-    display_data()
-
-
 def show_training_data():
-    print(len(training_data))
     # see what happens if you change height and width, don't mess up on reshaping for the neural net
-    # was testing to see what happens when width and height are swapped
-    # image_data_train = np.array([i[0] for i in training_data]).reshape((-1, height, width, color_channels))
-    image_data_train, labels = sequence_data(training_data, shuffle_bool=True, incorporate_fps=True)
-    i = 0
-    image_data_train = image_data_train.reshape((-1, height, width, color_channels))
+    image_data_train = load_data()[0]
+    image_data_train = np.stack(image_data_train, axis=0)
     print(image_data_train.shape)
+    # image_data_train, labels = sequence_data(training_data, shuffle_bool=True, incorporate_fps=True)
+    i = 0
     t = time.time()
     count_frames = 0
     while True:
@@ -236,58 +238,25 @@ def show_training_data():
 
 
 def load_data():
-    global training_data
-    if os.path.isfile(current_file_name):
-        print("loading training data")
-        temp1 = list(np.load(file_name_1, allow_pickle=True))
-        temp2 = list(np.load(file_name_2, allow_pickle=True))
-        temp3 = list(np.load(file_name_3, allow_pickle=True))
-        temp4 = list(np.load(file_name_4, allow_pickle=True))
-        temp5 = list(np.load(file_name_5, allow_pickle=True))
-        temp6 = list(np.load(file_name_6, allow_pickle=True))
-        temp7 = list(np.load(file_name_7, allow_pickle=True))
-        temp8 = list(np.load(file_name_8, allow_pickle=True))
-        temp9 = list(np.load(file_name_9, allow_pickle=True))
-        training_data = temp1 + temp2 + temp3 + temp4 + temp5 + temp6 + temp7 + temp8 + temp9
-        print("done loading data")
-    else:
-        print("No training data found, starting from scratch")
-        training_data = []
-
-
-def load_for_show():
-    global training_data
-    training_data = np.load(file_name_9, allow_pickle=True)
-    # training_data = training_data[:len(training_data) // 50]
-
-
-def normalize_for_lstm_and_save():
-    t = time.time()
-    load_data()
-    print("Lading data took:", time.time() - t, "seconds.")
-    # normalize_lstm()
-    print(len(training_data))
-    t = time.time()
-    np.save(final_data_name, training_data)
-    print("Saving data took:", time.time() - t, "seconds.")
-
-
-def compress_numpy_arr():
-    load_for_show()
-    f = gzip.GzipFile("compressed_full_dataset.npy.gz", "w")
-    np.save(file=f, arr=training_data)
-    f.close()
+    print("loading training data")
+    images = []
+    labels = []
+    data_index = 0
+    filename = config.new_data_dir_name + config.data_name + f"_{data_index}.h5"
+    while os.path.isfile(filename):
+        with h5py.File(filename, "r") as hf:
+            print(hf.keys())
+            labels += list(hf.get("labels"))
+            images += list(hf.get("images"))
+        data_index += 1
+        filename = config.new_data_dir_name + config.data_name + f"_{data_index}.h5"
+    print(f"done loading data, loaded {data_index} parts.")
+    return images, labels
 
 
 if __name__ == "__main__":
-    current_file_name = file_name_10
-    # normalize_for_lstm_and_save()
-    # compress_numpy_arr()
-    # load_for_show()
-    # display_data()
-    # show_training_data()
-
+    # load_data()
     # normalize()
-    # main(False)
+    main(False)
     # show_training_data()
 
