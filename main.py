@@ -7,7 +7,7 @@ import config
 from tensorflow.keras.backend import clear_session
 from tensorflow import compat
 from tensorflow.keras.models import load_model
-from collect_training_data import w, wa, wd, s, a, d, key_check, monitor, nothing
+from collect_training_data import key_check
 from lenet import create_neural_net
 
 threshold_turn = 0
@@ -75,43 +75,44 @@ def forward_right():
         ReleaseKey(D)
 
 
-def output_key(x, y):
-    prediction = [0, 0, 0, 0, 0, 0, 0]
-    prediction[x] = 1
+def output_key(prediction):
+    max_idx = np.argmax(prediction)
+    output = ""
 
-    if y[x] > threshold_turn:
-        if prediction == a:
+    if prediction[max_idx] > threshold_turn:
+        if max_idx == config.outputs["a"]:
             left()
-            print("a", y[x])
-        elif prediction == wa:
+            output = "a"
+        elif max_idx == config.outputs["wa"]:
             forward_left()
-            print("wa", y[x])
-        elif prediction == wd:
+            output = "wa"
+        elif max_idx == config.outputs["wd"]:
             forward_right()
-            print("wd", y[x])
-        elif prediction == s:
+            output = "wd"
+        elif max_idx == config.outputs["s"]:
             backwards()
-            print("s", y[x])
-        elif prediction == d:
+            output = "s"
+        elif max_idx == config.outputs["d"]:
             right()
-            print("d", y[x])
-        elif prediction == w:
+            output = "d"
+        elif max_idx == config.outputs["w"]:
             forward()
-            print("w", y[x])
-        elif prediction == nothing:
+            output = "w"
+        elif max_idx == config.outputs["nothing"]:
             release_all()
-            print("nothing", y[x])
+            output = "nothing"
         else:
             print("error big time")
     else:
         forward()
-        print("w", y[x])
+        output = "w"
+    print("Prediction:", output, "Value", prediction[max_idx])
 
 
 # noinspection PyTypeChecker
 def show_screen():
     sct = mss.mss()
-    monitor = {'top': 27, 'left': 0, 'width': 800, 'height': 600}
+    monitor = config.monitor
     while 1:
         img = np.asarray(sct.grab(monitor))     # output is bgra
         img = cv2.resize(img, (int(config.width), int(config.height)))
@@ -134,6 +135,7 @@ def main_with_lstm():
     print("Model took:", time.time() - t, "to load.")
     net.summary()
     sct = mss.mss()
+    monitor = config.monitor
     counter = 0
     t = time.time()
     images = []
@@ -151,18 +153,14 @@ def main_with_lstm():
         if len(images) < config.sequence_len:
             images.append(img)
         else:
-            # when sequence_len amount of images are captured predictions starts, length being kept at sequence_len
             images.pop(0)   # remove oldest image
             images.append(img)  # always have last seq_len images, put newest image at the end
             # create numpy array from list and reshape to correct dimensions, height, then width!!!!!!!!
             input_arr = np.stack(images, axis=0).reshape((-1, config.sequence_len, config.height,
                                                           config.width, config.color_channels))
-            # prediction shape is (1, predicted_class_one_hot)
-            prediction_distribution = net.predict(input_arr)[0]
-            # argmax gives index of prediction
-            prediction = np.argmax(prediction_distribution, axis=-1)  # get output of last image
+            prediction = net.predict(input_arr)[0]
             # press predicted keys and display prediction
-            output_key(prediction, prediction_distribution)
+            output_key(prediction)
         if (time.time() - t) >= 1:
             print("fps:", counter)
             counter = 0

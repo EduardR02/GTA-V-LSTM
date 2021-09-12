@@ -1,5 +1,4 @@
 from collections import Counter
-from random import shuffle
 import numpy as np
 import mss
 import cv2
@@ -11,37 +10,29 @@ from training import sequence_data
 import h5py
 from threading import Thread as Worker
 import config
+import utils
 
 curr_file_index = 0
 gb_per_file = 2
 
-monitor = {'top': 27, 'left': 0, 'width': 800, 'height': 600}
-w = [1, 0, 0, 0, 0, 0, 0]
-a = [0, 1, 0, 0, 0, 0, 0]
-s = [0, 0, 1, 0, 0, 0, 0]
-d = [0, 0, 0, 1, 0, 0, 0]
-wa = [0, 0, 0, 0, 1, 0, 0]
-wd = [0, 0, 0, 0, 0, 1, 0]
-nothing = [0, 0, 0, 0, 0, 1, 0]
-
 
 def convert_output(key):
-
+    output = np.zeros(config.output_classes)
     if "A" in key and "W" in key:
-        output = wa
+        output[config.outputs["wa"]] = 1
     elif "D" in key and "W" in key:
-        output = wd
+        output[config.outputs["wd"]] = 1
     elif "S" in key:
-        output = s
+        output[config.outputs["s"]] = 1
     elif "D" in key:
-        output = d
+        output[config.outputs["d"]] = 1
     elif "A" in key:
-        output = a
+        output[config.outputs["a"]] = 1
     elif "W" in key:
-        output = w
+        output[config.outputs["w"]] = 1
     else:
-        output = nothing
-
+        output[config.outputs["nothing"]] = 1
+    # one hot np array
     return output
 
 
@@ -80,7 +71,9 @@ def main(only_fps_test_mode=False):
                 if not only_fps_test_mode:
                     # reduces fps a little for the time while saving, but without would stop loop for time of exec,
                     # meaning gaps in the data, multiprocessing module works worse, halts execution for a short time.
-                    t1 = Worker(target=save_with_hdf5, args=(train_images[:], train_labels[:]))
+                    temp_images = train_images
+                    temp_labels = train_labels
+                    t1 = Worker(target=save_with_hdf5, args=(temp_images, temp_labels))
                     t1.start()
                     train_images = []
                     train_labels = []
@@ -96,10 +89,11 @@ def main(only_fps_test_mode=False):
                 print("unpaused")
             else:
                 # if you press pause it probably means you want to discard last x frames
-                if len(train_labels) > 300 and not only_fps_test_mode:
-                    train_images = train_images[:-300]
-                    train_labels = train_labels[:-300]
-                    save_with_hdf5(train_images, train_labels)
+                if len(train_labels) > config.amt_remove_after_pause and not only_fps_test_mode:
+                    temp_images = train_images[:-config.amt_remove_after_pause]
+                    temp_labels = train_labels[:-config.amt_remove_after_pause]
+                    t1 = Worker(target=save_with_hdf5, args=(temp_images, temp_labels))
+                    t1.start()
                 print("paused")
                 curr_file_index = curr_file_index + 1
             paused = not paused
@@ -110,13 +104,13 @@ def main(only_fps_test_mode=False):
 
 
 def get_image_and_label(sct):
-    img = np.asarray(sct.grab(monitor))
+    img = np.asarray(sct.grab(config.monitor))
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     # cv2.imshow("Car View", img)
     img = cv2.resize(img, (config.width, config.height))
     key = key_check()
     output = convert_output(key)
-    return img, np.asarray(output)
+    return img, output
 
 
 def correct_file_counter(called_on_start):
@@ -146,7 +140,7 @@ def save_with_hdf5(data_x, data_y):
             hf["images"].resize((hf["images"].shape[0] + data_x.shape[0]), axis=0)
             hf["images"][-data_x.shape[0]:] = data_x
 
-            hf["labels"].resize((hf["images"].shape[0] + data_y.shape[0]), axis=0)
+            hf["labels"].resize((hf["labels"].shape[0] + data_y.shape[0]), axis=0)
             hf["labels"][-data_y.shape[0]:] = data_y
     file_size = os.stat(filename).st_size
     print(file_size)
@@ -160,60 +154,9 @@ def display_data(data):
     print(Counter(df[1].apply(str)))
 
 
-def normalize(data):
-    list_wa = []
-    list_w = []
-    list_wd = []
-    list_s = []
-    list_d = []
-    list_a = []
-
-    for i in data:
-        img = i[0]
-        dd = i[1]
-
-        if dd == w:
-            list_w.append([img, dd])
-        elif dd == wa:
-            list_wa.append([img, dd])
-        elif dd == wd:
-            list_wd.append([img, dd])
-        elif dd == a:
-            list_a.append([img, dd])
-        elif dd == s:
-            list_s.append([img, dd])
-        elif dd == d:
-            list_d.append([img, dd])
-        else:
-            print("uh oh stinky error")
-    list_w = list_w[:len(list_w)//2]
-    list_wa = list_wa[:len(list_wa)][:len(list_wd)]
-    list_wd = list_wd[:len(list_wa)][:len(list_wd)]
-    list_s = list_s[:len(list_w)]
-    list_a = list_a[:len(list_a)][:len(list_d)]
-    list_d = list_d[:len(list_a)][:len(list_d)]
-
-    print("list_w:", len(list_w))
-    print("list_wa:", len(list_wa))
-    print("list_wd:", len(list_wd))
-    print("list_s:", len(list_s))
-    print("list_d:", len(list_d))
-    print("list_a:", len(list_a))
-
-    all_data = list_w + list_a + list_wa + list_wd + list_d + list_s
-    print("all_data:", len(all_data))
-    t = time.time()
-    print(time.time() - t)
-    shuffle(all_data)
-    print(time.time() - t)
-    # np.save(final_data_name, all_data)
-    print(time.time() - t)
-    return all_data
-
-
 def show_training_data():
     # see what happens if you change height and width, don't mess up on reshaping for the neural net
-    image_data_train = load_data()[0]
+    image_data_train = utils.load_data()[0]
     image_data_train = np.stack(image_data_train, axis=0)
     print(image_data_train.shape)
     # image_data_train, labels = sequence_data(training_data, shuffle_bool=True, incorporate_fps=True)
@@ -223,7 +166,7 @@ def show_training_data():
     while True:
         img = image_data_train[i]
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)  # because cv2 imshow uses bgr not rgb
-        cv2.imshow("poop", img)
+        cv2.imshow("car_view", img)
         if time.time() - t > 1:
             t = time.time()
             print("fps:", count_frames)
@@ -235,23 +178,6 @@ def show_training_data():
         if cv2.waitKey(25) & 0xFF == ord('q'):
             cv2.destroyAllWindows()
             break
-
-
-def load_data():
-    print("loading training data")
-    images = []
-    labels = []
-    data_index = 0
-    filename = config.new_data_dir_name + config.data_name + f"_{data_index}.h5"
-    while os.path.isfile(filename):
-        with h5py.File(filename, "r") as hf:
-            print(hf.keys())
-            labels += list(hf.get("labels"))
-            images += list(hf.get("images"))
-        data_index += 1
-        filename = config.new_data_dir_name + config.data_name + f"_{data_index}.h5"
-    print(f"done loading data, loaded {data_index} parts.")
-    return images, labels
 
 
 if __name__ == "__main__":

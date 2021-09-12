@@ -7,11 +7,12 @@ from sklearn.utils import shuffle, class_weight
 from tensorflow.keras.models import load_model
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras import backend as K
-import gc
 import os
 import shutil
 import datetime
 import config
+import utils
+import random
 
 
 def setup_tf():
@@ -39,7 +40,7 @@ def train_model(load_saved, freeze=False, load_saved_cnn=False):
     model.compile(loss='categorical_crossentropy', optimizer=optimizer,
                   metrics=['accuracy'])
     model.summary()
-    custom_training_loop(model, 50, 5000, True, False, keep_dir=True)
+    custom_training_loop(model, config.allowed_ram_mb, 5000, True)
 
 
 def train_cnn_only(load_saved):
@@ -87,102 +88,140 @@ def cnn_only_training(model):
     print("Data reshaped in:", time.time() - t, "seconds.")
 
     model.fit(image_data_train, label_data_train,
-              epochs=config.eps, batch_size=config.BATCH_SIZE, class_weight=class_weights,
+              epochs=config.epochs, batch_size=config.BATCH_SIZE, class_weight=class_weights,
               validation_data=(image_data_validation, label_data_validation), shuffle=True)
     model.evaluate(image_data_test, label_data_test)
     model.save(config.cnn_only_name)
 
 
-def custom_training_loop(model, chunks, test_data_size, save_every_epoch, halfway_save, keep_dir=False):
+def custom_training_loop(model, allowed_ram_mb, test_data_size, save_every_epoch, normalize_input_values=True):
+    incorporate_fps = True
     log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1)
     class_weights = get_class_weights(test_data_size=test_data_size)
-    # prepare chunks and save them
-    subdivide_data(load_from=config.load_data_name, new_dir_name=config.temp_data_folder_name,
-                   chunks=chunks, keep_directory=keep_dir, test_data_size=test_data_size)
-    name_for_file_path = config.temp_data_folder_name + "/" + config.temp_data_chunk_name
-    for i in range(config.eps):
-        K.clear_session()
-        # + 1 as data could be split into +1 chunk because of test data size
-        for current_chunk in range(chunks + 1):
+    filenames = utils.get_sorted_filenames()
+    if config.random_file_order_train:
+        random.shuffle(filenames)
+    filenames = divide_dataset(filenames, allowed_ram_mb, test_data_size, normalize_input_values,
+                               incorporate_fps=incorporate_fps, known_normalize_growth=config.known_normalize_growth)
+    for epoch in range(config.epochs):
+        for i in range(len(filenames)):
             K.clear_session()
-            # check if file exists, if not this epoch is done
-            if os.path.isfile(name_for_file_path + str(current_chunk) + ".npy"):
-                data = np.load(name_for_file_path + str(current_chunk) + ".npy", allow_pickle=True)
-                images, labels = sequence_data(data, shuffle_bool=False, incorporate_fps=True)
-                del data
-                print("Epoch: {}; Chunk {} out of {}".format(i, current_chunk, chunks))
-                # test data is always last, meaning if next doesn't exists it's the test data
-                if os.path.isfile(name_for_file_path + str(current_chunk + 1) + ".npy"):
-                    # epochs is i+1 because we want to train only one iteration, initial epoch is "starting epoch"
-                    # if initial_epoch == epochs then it doesn't train  (just skips)
-                    model.fit(images, labels, epochs=i+1, batch_size=config.BATCH_SIZE,
-                              class_weight=class_weights, initial_epoch=i, validation_split=0.1,
-                              callbacks=[tensorboard_callback], shuffle=True)
-                else:
-                    model.evaluate(images, labels)
-                del images, labels
+            if os.path.isfile(filenames[i]["filename"]):
+                for j in range(filenames[i]["chunks"]):
+                    images, labels = utils.load_data()
+                    start_idx, stop_idx = filenames[i]["indices"][j], filenames[i]["indices"][j+1]
+                    # stop_idx is next start index, therefore not stop_idx-1 because is it the first NOT included index
+                    images, labels = images[start_idx:stop_idx], labels[start_idx:stop_idx]
+                    if normalize_input_values:
+                        images = utils.normalize_input_values(images, "float32")
+                    images, labels = sequence_data(images, labels, shuffle_bool=False, incorporate_fps=incorporate_fps)
+                    print(f"Epoch: {epoch}; {len(filenames) -  i} out of {len(filenames)} files to go!")
+                    # test data is always last, meaning if next doesn't exists it's the test data
+                    if not filenames[i]["test_data"]:
+                        model.fit(images, labels, epochs=epoch+1, batch_size=config.BATCH_SIZE,
+                                  class_weight=class_weights, initial_epoch=epoch, validation_split=0.1,
+                                  callbacks=[tensorboard_callback], shuffle=True)
+                    else:
+                        model.evaluate(images, labels)
             else:
-                break
-            # save at half if one epoch takes too long
-            if current_chunk == chunks // 2 and halfway_save and save_every_epoch:
-                model.save(config.model_name + "_epoch_" + str(i) + "_halfway")
-            gc.collect()
-        if save_every_epoch: model.save(config.model_name + "_epoch_" + str(i))
-        gc.collect()
+                print(f"File {filenames[i]['filename']} existed at the beginning, not anymore!")
+                continue
+        if save_every_epoch:
+            model.save(config.model_name + "_epoch_" + str(epoch))
     model.save(config.model_name + "_fully_trained")
-    # delete temporary created chunks
-    remove_subdivided_data(config.temp_data_folder_name)
 
 
-def sequence_data(data, shuffle_bool=True, incorporate_fps=True):
-    res = []
-    if len(data) < config.sequence_len:
-        print("Too little data")
-        return
-    # split data for memory efficiency
-    images = data[:, 0]
-    labels = data[:, 1]
-    del data
-    # approximate test time fps into training data
-    if not incorporate_fps:
-        if len(images) < config.sequence_len:
-            raise ValueError("Not enough data, minimum length should be {}, but is {}"
-                             .format(config.sequence_len, len(images)))
+def divide_dataset(filenames, allowed_ram_mb, test_data_size=0, normalize_input_values=True, incorporate_fps=True, known_normalize_growth=0):
+    m_byte = (1024 ** 2)
+    file_size_limit = allowed_ram_mb // config.sequence_len
+    res_filenames = []
+    for i in range(len(filenames) - 1, -1, -1):
+        full_filename = config.new_data_dir_name + filenames[i]
+        divider = {"filename": full_filename}
+        labels = utils.load_file_only_labels(full_filename)
+        # only load images if necessary
+        file_size_mb = os.stat(full_filename).st_size // m_byte
+        if normalize_input_values:
+            if known_normalize_growth == 0:
+                images = utils.load_file_only_images(full_filename)
+                images = utils.normalize_input_values(images, "float32")
+                file_size_mb = images.nbytes // m_byte + labels.nbytes // m_byte
+            else:
+                file_size_mb = int(file_size_mb * known_normalize_growth)
 
-        for i in range(len(images) - config.sequence_len + 1):
-            res += list(images[i:i+config.sequence_len])    # select sequence length
+        if test_data_size <= 0:
+            divider["test_data"] = False
+        elif test_data_size < len(labels):
+            full_seq_len = config.sequence_len * utils.get_fps_ratio() if incorporate_fps else config.sequence_len
+            if test_data_size > full_seq_len:
+                new_divider = div_test_data_helper(full_filename, test_data_size,
+                                                   file_size_limit, normalize_input_values, is_test=True)
+                res_filenames.insert(0, new_divider)
+            if len(labels) - test_data_size > full_seq_len:
+                new_divider = div_test_data_helper(full_filename, test_data_size,
+                                                   file_size_limit, normalize_input_values, is_test=False)
+                res_filenames.insert(0, new_divider)
+            test_data_size = 0
+            continue
+        else:
+            test_data_size -= len(labels)
+            divider["test_data"] = True
 
-        images = np.asarray(res).reshape((-1, config.sequence_len, config.height, config.width, config.color_channels))
-        del res
-        # need to match labels to last image in sequence
-        labels = np.concatenate(labels[config.sequence_len - 1:], axis=0).reshape((-1, config.output_classes))
+        calc_chunks_and_indices(file_size_mb, file_size_limit, len(labels), divider)
+        res_filenames.insert(0, divider)
+    return res_filenames
+
+
+def div_test_data_helper(filename, test_data_size, file_size_limit, normalize_input_values, is_test=True):
+    m_byte = (1024 ** 2)
+    new_divider = {"filename": filename, "test_data": is_test}
+    images, labels = utils.load_file(filename)
+    original_len = len(labels)
+    if is_test:
+        images, labels = images[-test_data_size:], labels[-test_data_size:]
     else:
-        # determines how many frames to skip
-        fps_ratio = int(round(config.fps_at_recording_time / config.fps_at_test_time))
-        if fps_ratio == 0: raise ValueError('Fps ratio is 0, cannot divide by 0')
-        if len(images) < config.sequence_len * fps_ratio:
-            raise ValueError("Not enough data, minimum length should be {}, but is {}"
-                             .format(config.sequence_len*fps_ratio, len(images)))
+        images, labels = images[:-test_data_size], labels[:-test_data_size]
+    if normalize_input_values:
+        images = utils.normalize_input_values(images, "float32")
+    file_size_mb = images.nbytes // m_byte + labels.nbytes // m_byte
+    offset = original_len - len(labels) if is_test else 0
+    calc_chunks_and_indices(file_size_mb, file_size_limit, len(labels), new_divider, offset)
+    return new_divider
 
-        for i in range(len(images) - config.sequence_len * fps_ratio + 1):
-            res += list(images[i: i + (fps_ratio*config.sequence_len): fps_ratio])
 
-        images = np.asarray(res).reshape((-1, config.sequence_len, config.height, config.width, config.color_channels))
-        del res
-        labels = np.concatenate(labels[(fps_ratio*config.sequence_len) - 1:], axis=0).reshape((-1, config.output_classes))
+def calc_chunks_and_indices(file_size_mb, file_size_limit, data_len, divider, offset=0):
+    divider["chunks"] = file_size_mb // file_size_limit + 1
+    step = data_len / divider["chunks"]
+    divider["indices"] = [int(round(chunk * step)) + offset for chunk in range(divider["chunks"] + 1)]
+
+
+def sequence_data(data_x, data_y, shuffle_bool=True, incorporate_fps=True):
+    if len(data_x) != len(data_y):
+        ValueError(f"Data_x and Data_y length differ: Data_x:{len(data_x)}, Data_y:{len(data_y)}")
+    images = []
+    fps_ratio = utils.get_fps_ratio()
+    if fps_ratio == 0 and incorporate_fps:
+        raise ValueError('Fps ratio is 0, cannot divide by 0')
+    full_seq_len = config.sequence_len * fps_ratio if incorporate_fps else config.sequence_len
+    step = fps_ratio if incorporate_fps else 1
+
+    if len(data_y) < full_seq_len:
+        raise ValueError(f"Not enough data, minimum length should be {full_seq_len}, but is {len(data_y)}")
+
+    for i in range(len(data_x) - full_seq_len + step):
+        # i + full_seq_len is last NOT included index, therefore + step in for loop above
+        images += [data_x[i:i+full_seq_len:step]]
+    images = np.stack(images, axis=0)
+    labels = data_y[full_seq_len-step:]
     # use keras fit shuffle, this creates a copy -> both arrays in ram for short time
-    # also don't use if you use validation_split in fit,
-    # as it will kill the purpose (seen data as validation over multiple epochs)
+    # also don't use if you use validation_split in fit (seen data as validation over multiple epochs)
     if shuffle_bool:
         images, labels = shuffle(images, labels)    # shuffle both the same way
-    gc.collect()
-    print("Image array shape:", images.shape)
-    print("Label array shape", labels.shape)
     return images, labels
 
 
-# creates a new directory with divided dataset into smaller chunks
+# not needed anymore
 def subdivide_data(load_from, new_dir_name, chunks, keep_directory, test_data_size=None):
     # keep directory assumes the files are correct, will perform training as if they just got created
     if keep_directory and os.path.isdir(new_dir_name):
@@ -199,7 +238,7 @@ def subdivide_data(load_from, new_dir_name, chunks, keep_directory, test_data_si
     try:
         os.makedirs(new_dir_name)
     except OSError:
-        print("Creation of the directory %s failed, probably because it already exists" % new_dir_name)
+        print(f"Creation of the directory {new_dir_name} failed, probably because it already exists")
         return
     step = len(data) // chunks
     for i in range(chunks):
@@ -222,9 +261,9 @@ def subdivide_data(load_from, new_dir_name, chunks, keep_directory, test_data_si
 def remove_subdivided_data(dir_to_remove_name):
     if os.path.isdir(dir_to_remove_name):
         shutil.rmtree(dir_to_remove_name)
-        print("Directory %s successfully removed" % dir_to_remove_name)
+        print(f"Directory {dir_to_remove_name} successfully removed")
     else:
-        print("Directory %s not found" % dir_to_remove_name)
+        print(f"Directory {dir_to_remove_name} not found")
 
 
 def get_inverse_proportions(data):
@@ -239,22 +278,42 @@ def get_inverse_proportions(data):
 
 
 def get_class_weights(test_data_size=0):
-    data = np.load(config.load_data_name, allow_pickle=True)
-    labels = data[:, 1]
-    del data
-    gc.collect()
-    labels = labels[:-test_data_size]
-    labels = [y.index(max(y)) for y in labels]
-    inverse_proportions = class_weight.compute_class_weight('balanced',
-                                                            classes=np.unique(labels),
-                                                            y=labels)
+    labels = utils.load_labels_only()
+    # remove last x rows
+    labels = np.concatenate(labels, axis=0)
+    if test_data_size:
+        labels = labels[:-test_data_size, :]
+    labels = np.argmax(labels, axis=-1)
+    classes = np.asarray(range(config.output_classes))
+    inverse_proportions = class_weight.compute_class_weight('balanced', classes=classes, y=labels)
     inverse_proportions = dict(enumerate(inverse_proportions))
     print("Proportions:", inverse_proportions)
     del labels
-    gc.collect()
     return inverse_proportions
 
 
+def test_sequence_data_no_mismatch():
+    x = np.random.rand(1000, config.height, config.width, config.color_channels)
+    y = np.random.rand(1000, config.output_classes)
+    print("Images shape:", x.shape, "Labels shape:", y.shape)
+    xx, yy = sequence_data(x, y, shuffle_bool=False, incorporate_fps=True)
+    print("Images match?:", xx[-100][-1][0][0] == x[-100][0][0], "Labels match?:", yy[-100] == y[-100])
+    del xx, yy
+    xx, yy = sequence_data(x, y, shuffle_bool=False, incorporate_fps=False)
+    print("Images match?:", xx[-100][-1][0][0] == x[-100][0][0], "Labels match?:", yy[-100] == y[-100])
+
+
+def test_divide_dataset():
+    filenames = utils.get_sorted_filenames()
+    if config.random_file_order_train:
+        random.shuffle(filenames)
+    filenames = divide_dataset(filenames, config.allowed_ram_mb, 10000, normalize_input_values=True,
+                               incorporate_fps=False, known_normalize_growth=config.known_normalize_growth)
+    for entry in filenames:
+        print(entry)
+
+
 if __name__ == "__main__":
-    train_model(False, freeze=True, load_saved_cnn=True)
+    # train_model(False, freeze=True, load_saved_cnn=True)
+    test_divide_dataset()
     # train_cnn_only(True)

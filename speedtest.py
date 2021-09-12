@@ -72,5 +72,37 @@ def test_output_shape():
     print(x)
 
 
+def test_list_creating(reps):
+    t = time.time()
+    # fastest by far
+    for i in range(reps):
+        new_list = [j for j in range(100)]
+    print("First method took:", time.time() - t)
+    t = time.time()
+    for i in range(reps):
+        new_list = []
+        for j in range(100):
+            new_list.append(j)
+    print("Second method took:", time.time() - t)
+    t = time.time()
+    for i in range(reps):
+        new_list = []
+        for j in range(100):
+            new_list += [j]
+    print("Third method took:", time.time() - t)
+
+
+def test_if_still_np():
+    x = np.random.rand(100, 3, 4, 2)
+    sequence = x[0:50:5]
+    k = [0]*100
+    k = k[0:50]
+    print(len(k))
+    print(sequence.shape)
+    print(sequence)
+    sequence = sequence[:-1]
+    print(sequence.shape)
+
+
 if __name__ == "__main__":
-    predict_vs_other()
+    test_if_still_np()
