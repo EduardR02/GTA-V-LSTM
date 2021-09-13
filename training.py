@@ -50,48 +50,77 @@ def train_cnn_only(load_saved):
     else:
         model = create_cnn_only()
     model.summary()
-    cnn_only_training(model)
+    cnn_only_training(model, True)
 
 
-def cnn_only_training(model):
-    class_weights = get_class_weights(test_data_size=10000)
-    t = time.time()
-    train_data = np.load(config.load_data_name, allow_pickle=True)
-    print("Data loaded in:", time.time() - t, "seconds.")
-
-    # train_data = train_data[:len(train_data) // 10]
-
-    print("Training data amount:", len(train_data))
-
-    train = train_data[:-10000]
-    validation = train_data[-10000:-5000]
-    test = train_data[-5000:]
-    # delete lists when already processed to speed everything up when memory limited
-    del train_data
-    t = time.time()
-    # height, width is the correct reshape order!!!!!!!!!
-
-    label_data_train = np.array([i[1] for i in train]).reshape((-1, config.output_classes))
-    image_data_train = np.array([i[0] for i in train]).reshape((-1, config.height, config.width, config.color_channels))
-    print(label_data_train.shape, image_data_train.shape)
-    del train
-
-    label_data_validation = np.array([i[1] for i in validation]).reshape((-1, config.output_classes))
-    image_data_validation = np.array([i[0] for i in validation]).reshape((-1, config.height,
-                                                                          config.width, config.color_channels))
-    del validation
-
-    label_data_test = np.array([i[1] for i in test]).reshape((-1, config.output_classes))
-    image_data_test = np.array([i[0] for i in test]).reshape((-1, config.height, config.width, config.color_channels))
-    del test
-
-    print("Data reshaped in:", time.time() - t, "seconds.")
-
-    model.fit(image_data_train, label_data_train,
-              epochs=config.epochs, batch_size=config.BATCH_SIZE, class_weight=class_weights,
-              validation_data=(image_data_validation, label_data_validation), shuffle=True)
-    model.evaluate(image_data_test, label_data_test)
+def cnn_only_training(model, normalize_inputs=True):
+    test_data_size = 10000
+    class_weights = get_class_weights(test_data_size=test_data_size)
+    filenames = utils.get_sorted_filenames()
+    random.shuffle(filenames)
+    filename_dict_list = divide_dataset_cnn_only(filenames, test_data_size, normalize_inputs,
+                                                 config.known_normalize_growth, allowed_ram=config.allowed_ram_mb)
+    for epoch in config.epochs:
+        for filename_dict in filename_dict_list:
+            images = []
+            labels = []
+            for filename in filename_dict["filenames"]:
+                data_x, data_y = utils.load_file(filename)
+                if normalize_inputs:
+                    data_x = utils.normalize_input_values(data_x, "float32")
+                images += [data_x]
+                labels += [data_y]
+            if "start_index" in filename_dict:
+                idx_start, idx_stop = filename_dict["start_index"], filename_dict["stop_index"]
+                list_idx = 0 if filename_dict["is_test"] else -1
+                images[list_idx] = images[list_idx][idx_start:idx_stop]
+                labels[list_idx] = labels[list_idx][idx_start:idx_stop]
+            images = np.concatenate(images, axis=0)
+            labels = np.concatenate(labels, axis=0)
+            if not filename_dict["is_test"]:
+                model.fit(images, labels,
+                          epochs=epoch+1, initial_epoch=epoch, batch_size=config.BATCH_SIZE,
+                          class_weight=class_weights, validation_split=0.05, shuffle=True)
+            else:
+                model.evaluate(images, labels)
     model.save(config.cnn_only_name)
+
+
+def divide_dataset_cnn_only(filenames, test_data_size, normalize_inputs, normalize_factor=0, allowed_ram=config.allowed_ram_mb):
+    res_list = []
+    filename_dict = {"filenames": [], "is_test": False}
+    left_mem = allowed_ram
+    for i in range(len(filenames) - 1, -1, -1):
+        full_filename = config.new_data_dir_name + filenames[i]
+        file_size_mb = calc_filesize(full_filename, normalize_inputs, normalize_factor)
+        labels = utils.load_file_only_labels(full_filename)
+        if test_data_size <= 0:
+            filename_dict["is_test"] = False
+        elif len(labels) > test_data_size:
+            filename_dict["stop_index"] = len(labels)
+            filename_dict["start_index"] = len(labels) - test_data_size
+            filename_dict["is_test"] = True
+            filename_dict["filenames"].insert(0, full_filename)
+            res_list.insert(0, filename_dict)
+
+            filename_dict = {"filenames": [full_filename], "stop_index":  len(labels) - test_data_size,
+                             "start_index": 0, "is_test": False}
+            left_mem = allowed_ram
+            test_data_size = 0
+            continue
+        else:
+            test_data_size -= len(labels)
+            filename_dict["is_test"] = True
+
+        if file_size_mb > left_mem:
+            left_mem = allowed_ram
+            res_list.insert(0, filename_dict)
+            filename_dict = {"filenames": [], "is_test": False}
+        filename_dict["filenames"].insert(0, full_filename)
+        left_mem -= file_size_mb
+    if filename_dict["filenames"]:
+        res_list.insert(0, filename_dict)
+    return res_list
 
 
 def custom_training_loop(model, allowed_ram_mb, test_data_size, save_every_epoch, normalize_input_values=True):
@@ -109,7 +138,7 @@ def custom_training_loop(model, allowed_ram_mb, test_data_size, save_every_epoch
             K.clear_session()
             if os.path.isfile(filenames[i]["filename"]):
                 for j in range(filenames[i]["chunks"]):
-                    images, labels = utils.load_data()
+                    images, labels = utils.load_file(filenames[i]["filename"])
                     start_idx, stop_idx = filenames[i]["indices"][j], filenames[i]["indices"][j+1]
                     # stop_idx is next start index, therefore not stop_idx-1 because is it the first NOT included index
                     images, labels = images[start_idx:stop_idx], labels[start_idx:stop_idx]
@@ -133,7 +162,6 @@ def custom_training_loop(model, allowed_ram_mb, test_data_size, save_every_epoch
 
 
 def divide_dataset(filenames, allowed_ram_mb, test_data_size=0, normalize_input_values=True, incorporate_fps=True, known_normalize_growth=0):
-    m_byte = (1024 ** 2)
     file_size_limit = allowed_ram_mb // config.sequence_len
     res_filenames = []
     for i in range(len(filenames) - 1, -1, -1):
@@ -141,15 +169,7 @@ def divide_dataset(filenames, allowed_ram_mb, test_data_size=0, normalize_input_
         divider = {"filename": full_filename}
         labels = utils.load_file_only_labels(full_filename)
         # only load images if necessary
-        file_size_mb = os.stat(full_filename).st_size // m_byte
-        if normalize_input_values:
-            if known_normalize_growth == 0:
-                images = utils.load_file_only_images(full_filename)
-                images = utils.normalize_input_values(images, "float32")
-                file_size_mb = images.nbytes // m_byte + labels.nbytes // m_byte
-            else:
-                file_size_mb = int(file_size_mb * known_normalize_growth)
-
+        file_size_mb = calc_filesize(full_filename, normalize_input_values, known_normalize_growth)
         if test_data_size <= 0:
             divider["test_data"] = False
         elif test_data_size < len(labels):
@@ -194,6 +214,20 @@ def calc_chunks_and_indices(file_size_mb, file_size_limit, data_len, divider, of
     divider["chunks"] = file_size_mb // file_size_limit + 1
     step = data_len / divider["chunks"]
     divider["indices"] = [int(round(chunk * step)) + offset for chunk in range(divider["chunks"] + 1)]
+
+
+def calc_filesize(full_filename, normalize, normalize_factor=0):
+    m_byte = 1024 ** 2
+    file_size_mb = os.stat(full_filename).st_size // m_byte
+    if normalize:
+        if normalize_factor == 0:
+            images = utils.load_file_only_images(full_filename)
+            images = utils.normalize_input_values(images, "float32")
+            labels = utils.load_file_only_labels(full_filename)
+            file_size_mb = images.nbytes // m_byte + labels.nbytes // m_byte
+        else:
+            file_size_mb = int(file_size_mb * normalize_factor)
+    return file_size_mb
 
 
 def sequence_data(data_x, data_y, shuffle_bool=True, incorporate_fps=True):
@@ -313,7 +347,17 @@ def test_divide_dataset():
         print(entry)
 
 
+def test_divide_cnn_only():
+    filenames = utils.get_sorted_filenames()
+    if config.random_file_order_train:
+        random.shuffle(filenames)
+    my_dict = divide_dataset_cnn_only(filenames, 300000, False, normalize_factor=config.known_normalize_growth,
+                                      allowed_ram=config.allowed_ram_mb)
+    for i in my_dict:
+        print(i)
+
+
 if __name__ == "__main__":
     # train_model(False, freeze=True, load_saved_cnn=True)
-    test_divide_dataset()
+    test_divide_cnn_only()
     # train_cnn_only(True)
