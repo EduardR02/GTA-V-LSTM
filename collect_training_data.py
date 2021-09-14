@@ -48,15 +48,14 @@ def main(only_fps_test_mode=False):
     correct_file_counter(True)  # start with new file
     train_images = []
     train_labels = []
-    # start()
-    paused = False
+    paused = True
+    print("starting paused")
     counter = 0
     counter2 = 0
     n = 1
     t = time.time()
     sct = mss.mss()
     key_check()
-    start()
     while True:
         if not paused:
             counter += 1
@@ -89,12 +88,17 @@ def main(only_fps_test_mode=False):
                 print("unpaused")
             else:
                 # if you press pause it probably means you want to discard last x frames
+
                 if len(train_labels) > config.amt_remove_after_pause and not only_fps_test_mode:
+                    print("paused, wait for saving to finish")
                     temp_images = train_images[:-config.amt_remove_after_pause]
                     temp_labels = train_labels[:-config.amt_remove_after_pause]
                     t1 = Worker(target=save_with_hdf5, args=(temp_images, temp_labels))
                     t1.start()
-                print("paused")
+                    t1.join()
+                    print("done saving")
+                else:
+                    print("No need to save, too little data after last save")
                 curr_file_index = curr_file_index + 1
             paused = not paused
             train_images = []
@@ -157,7 +161,7 @@ def display_data(data):
 def show_training_data():
     # see what happens if you change height and width, don't mess up on reshaping for the neural net
     image_data_train = utils.load_data()[0]
-    image_data_train = np.stack(image_data_train, axis=0)
+    image_data_train = np.concatenate(image_data_train, axis=0)
     print(image_data_train.shape)
     # image_data_train, labels = sequence_data(training_data, shuffle_bool=True, incorporate_fps=True)
     i = 0
@@ -180,9 +184,22 @@ def show_training_data():
             break
 
 
+def test_collection_correct():
+    images, labels = utils.load_data()
+    images = np.concatenate(images, axis=0)
+    labels = np.concatenate(labels, axis=0)
+    print(images.shape, labels.shape)
+    labels = np.argmax(labels, axis=-1)
+    print(labels)
+    print(labels.shape)
+    labels = np.unique(labels)
+    print(labels)
+
+
 if __name__ == "__main__":
     # load_data()
     # normalize()
     main(False)
+    # test_collection_correct()
     # show_training_data()
 

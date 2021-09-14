@@ -60,8 +60,9 @@ def cnn_only_training(model, normalize_inputs=True):
     random.shuffle(filenames)
     filename_dict_list = divide_dataset_cnn_only(filenames, test_data_size, normalize_inputs,
                                                  config.known_normalize_growth, allowed_ram=config.allowed_ram_mb)
-    for epoch in config.epochs:
+    for epoch in range(config.epochs):
         for filename_dict in filename_dict_list:
+            K.clear_session()
             images = []
             labels = []
             for filename in filename_dict["filenames"]:
@@ -138,6 +139,7 @@ def custom_training_loop(model, allowed_ram_mb, test_data_size, save_every_epoch
             K.clear_session()
             if os.path.isfile(filenames[i]["filename"]):
                 for j in range(filenames[i]["chunks"]):
+                    K.clear_session()
                     images, labels = utils.load_file(filenames[i]["filename"])
                     start_idx, stop_idx = filenames[i]["indices"][j], filenames[i]["indices"][j+1]
                     # stop_idx is next start index, therefore not stop_idx-1 because is it the first NOT included index
@@ -317,6 +319,7 @@ def get_class_weights(test_data_size=0):
     labels = np.concatenate(labels, axis=0)
     if test_data_size:
         labels = labels[:-test_data_size, :]
+    print(labels.shape)
     labels = np.argmax(labels, axis=-1)
     classes = np.asarray(range(config.output_classes))
     inverse_proportions = class_weight.compute_class_weight('balanced', classes=classes, y=labels)
@@ -351,7 +354,7 @@ def test_divide_cnn_only():
     filenames = utils.get_sorted_filenames()
     if config.random_file_order_train:
         random.shuffle(filenames)
-    my_dict = divide_dataset_cnn_only(filenames, 300000, False, normalize_factor=config.known_normalize_growth,
+    my_dict = divide_dataset_cnn_only(filenames, 30000, True, normalize_factor=config.known_normalize_growth,
                                       allowed_ram=config.allowed_ram_mb)
     for i in my_dict:
         print(i)
@@ -359,5 +362,4 @@ def test_divide_cnn_only():
 
 if __name__ == "__main__":
     # train_model(False, freeze=True, load_saved_cnn=True)
-    test_divide_cnn_only()
-    # train_cnn_only(True)
+    train_cnn_only(True)
