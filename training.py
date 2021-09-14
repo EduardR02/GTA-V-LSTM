@@ -13,6 +13,7 @@ import datetime
 import config
 import utils
 import random
+import gc
 
 
 def setup_tf():
@@ -71,6 +72,7 @@ def cnn_only_training(model, normalize_inputs=True):
                     data_x = utils.normalize_input_values(data_x, "float32")
                 images += [data_x]
                 labels += [data_y]
+                del data_x, data_y
             if "start_index" in filename_dict:
                 idx_start, idx_stop = filename_dict["start_index"], filename_dict["stop_index"]
                 list_idx = 0 if filename_dict["is_test"] else -1
@@ -84,6 +86,8 @@ def cnn_only_training(model, normalize_inputs=True):
                           class_weight=class_weights, validation_split=0.05, shuffle=True)
             else:
                 model.evaluate(images, labels)
+            del images, labels
+            gc.collect()
     model.save(config.cnn_only_name)
 
 
@@ -155,6 +159,8 @@ def custom_training_loop(model, allowed_ram_mb, test_data_size, save_every_epoch
                                   callbacks=[tensorboard_callback], shuffle=True)
                     else:
                         model.evaluate(images, labels)
+                    del images, labels
+                    gc.collect()
             else:
                 print(f"File {filenames[i]['filename']} existed at the beginning, not anymore!")
                 continue
@@ -362,4 +368,4 @@ def test_divide_cnn_only():
 
 if __name__ == "__main__":
     # train_model(False, freeze=True, load_saved_cnn=True)
-    train_cnn_only(True)
+    train_cnn_only(False)
