@@ -160,15 +160,21 @@ def display_data(data):
 
 def show_training_data():
     # see what happens if you change height and width, don't mess up on reshaping for the neural net
-    image_data_train = utils.load_data()[0]
-    image_data_train = np.concatenate(image_data_train, axis=0)
-    print(image_data_train.shape)
+    images, labels = utils.load_file(config.new_data_dir_name + "240x180_rgb_44.h5")
+    images = np.stack(images, axis=0)
+    labels = np.stack(labels, axis=0)
+    print(images.shape, labels.shape)
+    images, labels = sequence_data(images, labels, shuffle_bool=True, incorporate_fps=False)
+    print(images.shape, labels.shape)
+    images = images.reshape((-1, config.height, config.width, config.color_channels))
+
+    print(images.shape)
     # image_data_train, labels = sequence_data(training_data, shuffle_bool=True, incorporate_fps=True)
     i = 0
     t = time.time()
     count_frames = 0
     while True:
-        img = image_data_train[i]
+        img = images[i]
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)  # because cv2 imshow uses bgr not rgb
         cv2.imshow("car_view", img)
         if time.time() - t > 1:
@@ -177,7 +183,7 @@ def show_training_data():
             count_frames = 0
         count_frames += 1
         i += 1
-        if len(image_data_train) <= i:
+        if len(images) <= i:
             break
         if cv2.waitKey(25) & 0xFF == ord('q'):
             cv2.destroyAllWindows()
@@ -199,7 +205,7 @@ def test_collection_correct():
 if __name__ == "__main__":
     # load_data()
     # normalize()
-    main(False)
+    # main(False)
     # test_collection_correct()
-    # show_training_data()
+    show_training_data()
 

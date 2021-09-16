@@ -14,13 +14,14 @@ import config
 import utils
 import random
 import gc
+import cv2
 
 
 def setup_tf():
     tf.keras.backend.clear_session()
-    config = compat.v1.ConfigProto()
-    config.gpu_options.allow_growth = True
-    compat.v1.Session(config=config)
+    config_var = compat.v1.ConfigProto()
+    config_var.gpu_options.allow_growth = True
+    compat.v1.Session(config=config_var)
     gpus = tf.config.experimental.list_physical_devices('GPU')
     for gpu in gpus:
         tf.config.experimental.set_memory_growth(gpu, True)
@@ -41,7 +42,8 @@ def train_model(load_saved, freeze=False, load_saved_cnn=False):
     model.compile(loss='categorical_crossentropy', optimizer=optimizer,
                   metrics=['accuracy'])
     model.summary()
-    custom_training_loop(model, config.allowed_ram_mb, 10000, True)
+    custom_training_loop(model, config.allowed_ram_mb, 10000, save_every_epoch=True,
+                         normalize_input_values=False, incorporate_fps=True)
 
 
 def train_cnn_only(load_saved):
@@ -150,7 +152,8 @@ def custom_training_loop(model, allowed_ram_mb, test_data_size, save_every_epoch
                     if normalize_input_values:
                         images = utils.normalize_input_values(images, "float32")
                     images, labels = sequence_data(images, labels, shuffle_bool=False, incorporate_fps=incorporate_fps)
-                    print(f"Epoch: {epoch}; {len(filenames) -  i} out of {len(filenames)} files to go!")
+                    print(f"Epoch: {epoch}; Chunk {j+1} out of {filenames[i]['chunks']};"
+                          f" {len(filenames) -  i} out of {len(filenames)} files to go!")
                     # test data is always last, meaning if next doesn't exists it's the test data
                     if not filenames[i]["test_data"]:
                         model.fit(images, labels, epochs=epoch+1, batch_size=config.BATCH_SIZE,
@@ -324,7 +327,6 @@ def get_class_weights(test_data_size=0):
     labels = np.concatenate(labels, axis=0)
     if test_data_size:
         labels = labels[:-test_data_size, :]
-    print(labels.shape)
     labels = np.argmax(labels, axis=-1)
     classes = np.asarray(range(config.output_classes))
     inverse_proportions = class_weight.compute_class_weight('balanced', classes=classes, y=labels)
@@ -372,5 +374,5 @@ def test_divide_cnn_only():
 
 
 if __name__ == "__main__":
-    # train_model(False, freeze=True, load_saved_cnn=True)
-    train_cnn_only(False)
+    train_model(False, freeze=True, load_saved_cnn=False)
+    # train_cnn_only(False)
