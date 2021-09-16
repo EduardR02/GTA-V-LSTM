@@ -2,6 +2,8 @@ import numpy as np
 import mss
 import cv2
 import time
+
+import utils
 from keys import PressKey, ReleaseKey, W, A, S, D
 import config
 from tensorflow.keras.backend import clear_session
@@ -127,9 +129,9 @@ def show_screen():
 
 def main_with_lstm():
     clear_session()
-    config = compat.v1.ConfigProto()
-    config.gpu_options.allow_growth = True
-    compat.v1.Session(config=config)
+    config_var = compat.v1.ConfigProto()
+    config_var.gpu_options.allow_growth = True
+    compat.v1.Session(config=config_var)
     t = time.time()
     net = load_model(config.model_name)
     print("Model took:", time.time() - t, "to load.")
@@ -139,6 +141,7 @@ def main_with_lstm():
     counter = 0
     t = time.time()
     images = []
+    key_check()
     while 1:
         counter += 1
         # noinspection PyTypeChecker
@@ -148,7 +151,7 @@ def main_with_lstm():
         img = cv2.resize(img, (config.width, config.height))
         # ! check again with new data
         img = img.reshape(config.height, config.width, config.color_channels)
-        img = img / 127.5 - 1
+        img = utils.normalize_input_values(img, "float32")
 
         if len(images) < config.sequence_len:
             images.append(img)
@@ -176,5 +179,5 @@ def main_with_lstm():
 
 
 if __name__ == "__main__":
-    # main_with_lstm()
-    show_screen()     # check alignment before running model
+    main_with_lstm()
+    # show_screen()     # check alignment before running model

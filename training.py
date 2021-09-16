@@ -41,7 +41,7 @@ def train_model(load_saved, freeze=False, load_saved_cnn=False):
     model.compile(loss='categorical_crossentropy', optimizer=optimizer,
                   metrics=['accuracy'])
     model.summary()
-    custom_training_loop(model, config.allowed_ram_mb, 5000, True)
+    custom_training_loop(model, config.allowed_ram_mb, 10000, True)
 
 
 def train_cnn_only(load_saved):
@@ -128,8 +128,7 @@ def divide_dataset_cnn_only(filenames, test_data_size, normalize_inputs, normali
     return res_list
 
 
-def custom_training_loop(model, allowed_ram_mb, test_data_size, save_every_epoch, normalize_input_values=True):
-    incorporate_fps = True
+def custom_training_loop(model, allowed_ram_mb, test_data_size, save_every_epoch, normalize_input_values=True, incorporate_fps = True):
     log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1)
     class_weights = get_class_weights(test_data_size=test_data_size)
@@ -364,6 +363,12 @@ def test_divide_cnn_only():
                                       allowed_ram=config.allowed_ram_mb)
     for i in my_dict:
         print(i)
+    for i in my_dict:
+        filesize = 0
+        for j in i["filenames"]:
+            filesize += os.stat(j).st_size
+        print((filesize * 4) // (1024 ** 2))
+        filesize = 0
 
 
 if __name__ == "__main__":
