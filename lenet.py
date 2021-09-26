@@ -51,6 +51,17 @@ def create_cnn_only():
     return cnn
 
 
+def replace_cnn_dense_layer(model):
+    np.random.seed(1000)
+    inputs = model.input
+    # cut off output layer and replace with new one
+    model = Dense(config.output_classes, activation="softmax")(model.layers[-2].output)
+    model = Model(inputs=inputs, outputs=model)
+    optimizer = Adam(learning_rate=config.lr)
+    model.compile(loss='categorical_crossentropy', optimizer=optimizer, metrics=['accuracy'])
+    return model
+
+
 def test_model_speed():
     name = "car_2_inception_and_lstm_normalized_more_dropout"
     # my_model = load_model(name)

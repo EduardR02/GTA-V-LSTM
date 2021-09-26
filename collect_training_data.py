@@ -14,6 +14,7 @@ import utils
 
 curr_file_index = 0
 gb_per_file = 2
+current_data_dir = config.stuck_data_dir_name
 
 
 def convert_output(key):
@@ -43,7 +44,7 @@ def start():
     print("Go!")
 
 
-def main(only_fps_test_mode=False):
+def main(only_fps_test_mode=False, no_pause_remove=True):
     global curr_file_index
     correct_file_counter(True)  # start with new file
     train_images = []
@@ -63,7 +64,8 @@ def main(only_fps_test_mode=False):
             img, label = get_image_and_label(sct)
             train_images.append(img)
             train_labels.append(label)
-
+            if len(train_labels) == 290 or len(train_labels) == config.sequence_len * utils.get_fps_ratio() - 10:
+                print(len(train_labels))
             if len(train_labels) % 1000 == 0:
                 print(counter)
                 print("Average Fps:", counter / n)
@@ -88,12 +90,12 @@ def main(only_fps_test_mode=False):
                 print("unpaused")
             else:
                 # if you press pause it probably means you want to discard last x frames
-
-                if len(train_labels) > config.amt_remove_after_pause and not only_fps_test_mode:
+                if no_pause_remove or (len(train_labels) > config.amt_remove_after_pause and not only_fps_test_mode):
                     print("paused, wait for saving to finish")
-                    temp_images = train_images[:-config.amt_remove_after_pause]
-                    temp_labels = train_labels[:-config.amt_remove_after_pause]
-                    t1 = Worker(target=save_with_hdf5, args=(temp_images, temp_labels))
+                    if not no_pause_remove:
+                        train_images = train_images[:-config.amt_remove_after_pause]
+                        train_labels = train_labels[:-config.amt_remove_after_pause]
+                    t1 = Worker(target=save_with_hdf5, args=(train_images, train_labels))
                     t1.start()
                     t1.join()
                     print("done saving")
@@ -101,9 +103,9 @@ def main(only_fps_test_mode=False):
                     print("No need to save, too little data after last save")
                 curr_file_index = curr_file_index + 1
             paused = not paused
+            time.sleep(0.1)
             train_images = []
             train_labels = []
-            time.sleep(1)
             t = time.time()
 
 
@@ -119,17 +121,17 @@ def get_image_and_label(sct):
 
 def correct_file_counter(called_on_start):
     global curr_file_index
-    filename = config.new_data_dir_name + config.data_name + f"_{curr_file_index}.h5"
+    filename = current_data_dir + config.data_name + f"_{curr_file_index}.h5"
     # iterate  to writable file
     while os.path.isfile(filename) and (called_on_start or os.stat(filename).st_size > (1024 ** 3 * gb_per_file)):
         curr_file_index = curr_file_index + 1
-        filename = config.new_data_dir_name + config.data_name + f"_{curr_file_index}.h5"
+        filename = current_data_dir + config.data_name + f"_{curr_file_index}.h5"
 
 
 def save_with_hdf5(data_x, data_y):
     global curr_file_index
     correct_file_counter(False)
-    filename = config.new_data_dir_name + config.data_name + f"_{curr_file_index}.h5"
+    filename = current_data_dir + config.data_name + f"_{curr_file_index}.h5"
     # both are lists of numpy array, retain structure but make it np array
     data_x = np.stack(data_x, axis=0)
     data_y = np.stack(data_y, axis=0)
@@ -160,13 +162,14 @@ def display_data(data):
 
 def show_training_data():
     # see what happens if you change height and width, don't mess up on reshaping for the neural net
-    images, labels = utils.load_file(config.new_data_dir_name + "240x180_rgb_44.h5")
+    images, labels = utils.load_file(current_data_dir + "240x180_rgb_20.h5")
     images = np.stack(images, axis=0)
     labels = np.stack(labels, axis=0)
     print(images.shape, labels.shape)
-    images, labels = sequence_data(images, labels, shuffle_bool=True, incorporate_fps=False)
+    tmep ,labels = sequence_data(images, labels, shuffle_bool=False, incorporate_fps=True)
     print(images.shape, labels.shape)
     images = images.reshape((-1, config.height, config.width, config.color_channels))
+    images = images[config.sequence_len*utils.get_fps_ratio()-utils.get_fps_ratio():]
 
     print(images.shape)
     # image_data_train, labels = sequence_data(training_data, shuffle_bool=True, incorporate_fps=True)
@@ -175,6 +178,12 @@ def show_training_data():
     count_frames = 0
     while True:
         img = images[i]
+        label = np.argmax(labels[i])
+        for key, value in config.outputs.items():
+            if value == label:
+                label = key
+                break
+        print(label)
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)  # because cv2 imshow uses bgr not rgb
         cv2.imshow("car_view", img)
         if time.time() - t > 1:
@@ -183,6 +192,7 @@ def show_training_data():
             count_frames = 0
         count_frames += 1
         i += 1
+        time.sleep(0.2)
         if len(images) <= i:
             break
         if cv2.waitKey(25) & 0xFF == ord('q'):
@@ -191,7 +201,7 @@ def show_training_data():
 
 
 def test_collection_correct():
-    images, labels = utils.load_data()
+    images, labels = utils.load_data(current_data_dir)
     images = np.concatenate(images, axis=0)
     labels = np.concatenate(labels, axis=0)
     print(images.shape, labels.shape)
@@ -205,7 +215,7 @@ def test_collection_correct():
 if __name__ == "__main__":
     # load_data()
     # normalize()
-    # main(False)
+    # main(False, no_pause_remove=True)
     # test_collection_correct()
     show_training_data()
 

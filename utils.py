@@ -4,31 +4,31 @@ import h5py
 import numpy as np
 
 
-def get_sorted_filenames():
+def get_sorted_filenames(dir_name):
     # sorts data by index only
-    filenames = os.listdir(config.new_data_dir_name)
+    filenames = os.listdir(dir_name)
     filenames.sort(key=lambda x: int(os.path.splitext(x)[0][len(config.data_name) + 1:]))
     return filenames
 
 
-def load_data():
+def load_data(dir_name):
     print("loading training data")
     images = []
     labels = []
-    filenames = get_sorted_filenames()
+    filenames = get_sorted_filenames(dir_name)
     for filename in filenames:
-        with h5py.File(config.new_data_dir_name + filename, "r") as hf:
+        with h5py.File(dir_name + filename, "r") as hf:
             labels += [hf.get("labels")[:]]
             images += [hf.get("images")[:]]
     print(f"Last filename was {filenames[-1]}")
     return images, labels
 
 
-def load_labels_only():
-    filenames = get_sorted_filenames()
+def load_labels_only(dir_name):
+    filenames = get_sorted_filenames(dir_name)
     labels = []
     for filename in filenames:
-        with h5py.File(config.new_data_dir_name + filename, "r") as hf:
+        with h5py.File(dir_name + filename, "r") as hf:
             labels += [hf.get("labels")[:]]
     return labels
 

@@ -1,6 +1,6 @@
 import numpy as np
 import tensorflow as tf
-from lenet import create_neural_net, create_cnn_only
+from lenet import create_neural_net, create_cnn_only, replace_cnn_dense_layer
 from tensorflow import compat
 import time
 from sklearn.utils import shuffle, class_weight
@@ -14,7 +14,8 @@ import config
 import utils
 import random
 import gc
-import cv2
+
+current_data_dir = config.new_data_dir_name
 
 
 def setup_tf():
@@ -46,20 +47,22 @@ def train_model(load_saved, freeze=False, load_saved_cnn=False):
                          normalize_input_values=False, incorporate_fps=True)
 
 
-def train_cnn_only(load_saved):
+def train_cnn_only(load_saved, swap_output_layer=False):
     setup_tf()
     if load_saved:
         model = load_model(config.cnn_only_name)
+        if swap_output_layer:
+            model = replace_cnn_dense_layer(model)
     else:
         model = create_cnn_only()
     model.summary()
-    cnn_only_training(model, True)
+    cnn_only_training(model, False)
 
 
 def cnn_only_training(model, normalize_inputs=True):
     test_data_size = 10000
     class_weights = get_class_weights(test_data_size=test_data_size)
-    filenames = utils.get_sorted_filenames()
+    filenames = utils.get_sorted_filenames(current_data_dir)
     random.shuffle(filenames)
     filename_dict_list = divide_dataset_cnn_only(filenames, test_data_size, normalize_inputs,
                                                  config.known_normalize_growth, allowed_ram=config.allowed_ram_mb)
@@ -82,12 +85,13 @@ def cnn_only_training(model, normalize_inputs=True):
                 labels[list_idx] = labels[list_idx][idx_start:idx_stop]
             images = np.concatenate(images, axis=0)
             labels = np.concatenate(labels, axis=0)
+            images, labels = convert_labels_to_time_pressed(images, labels)
             if not filename_dict["is_test"]:
                 model.fit(images, labels,
-                          epochs=epoch+1, initial_epoch=epoch, batch_size=config.BATCH_SIZE,
+                          epochs=epoch+1, initial_epoch=epoch, batch_size=config.CNN_ONLY_BATCH_SIZE,
                           class_weight=class_weights, validation_split=0.05, shuffle=True)
             else:
-                model.evaluate(images, labels)
+                model.evaluate(images, labels, batch_size=config.CNN_ONLY_BATCH_SIZE)
             del images, labels
             gc.collect()
     model.save(config.cnn_only_name)
@@ -98,7 +102,7 @@ def divide_dataset_cnn_only(filenames, test_data_size, normalize_inputs, normali
     filename_dict = {"filenames": [], "is_test": False}
     left_mem = allowed_ram
     for i in range(len(filenames) - 1, -1, -1):
-        full_filename = config.new_data_dir_name + filenames[i]
+        full_filename = current_data_dir + filenames[i]
         file_size_mb = calc_filesize(full_filename, normalize_inputs, normalize_factor)
         labels = utils.load_file_only_labels(full_filename)
         if test_data_size <= 0:
@@ -131,10 +135,10 @@ def divide_dataset_cnn_only(filenames, test_data_size, normalize_inputs, normali
 
 
 def custom_training_loop(model, allowed_ram_mb, test_data_size, save_every_epoch, normalize_input_values=True, incorporate_fps = True):
-    log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1)
+    """log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1)"""
     class_weights = get_class_weights(test_data_size=test_data_size)
-    filenames = utils.get_sorted_filenames()
+    filenames = utils.get_sorted_filenames(current_data_dir)
     if config.random_file_order_train:
         random.shuffle(filenames)
     filenames = divide_dataset(filenames, allowed_ram_mb, test_data_size, normalize_input_values,
@@ -151,6 +155,7 @@ def custom_training_loop(model, allowed_ram_mb, test_data_size, save_every_epoch
                     images, labels = images[start_idx:stop_idx], labels[start_idx:stop_idx]
                     if normalize_input_values:
                         images = utils.normalize_input_values(images, "float32")
+                    images, labels = convert_labels_to_time_pressed(images, labels)
                     images, labels = sequence_data(images, labels, shuffle_bool=False, incorporate_fps=incorporate_fps)
                     print(f"Epoch: {epoch}; Chunk {j+1} out of {filenames[i]['chunks']};"
                           f" {len(filenames) -  i} out of {len(filenames)} files to go!")
@@ -158,9 +163,9 @@ def custom_training_loop(model, allowed_ram_mb, test_data_size, save_every_epoch
                     if not filenames[i]["test_data"]:
                         model.fit(images, labels, epochs=epoch+1, batch_size=config.BATCH_SIZE,
                                   class_weight=class_weights, initial_epoch=epoch, validation_split=0.1,
-                                  callbacks=[tensorboard_callback], shuffle=True)
+                                  shuffle=True)
                     else:
-                        model.evaluate(images, labels)
+                        model.evaluate(images, labels, batch_size=config.BATCH_SIZE)
                     del images, labels
                     gc.collect()
             else:
@@ -175,7 +180,7 @@ def divide_dataset(filenames, allowed_ram_mb, test_data_size=0, normalize_input_
     file_size_limit = allowed_ram_mb // config.sequence_len
     res_filenames = []
     for i in range(len(filenames) - 1, -1, -1):
-        full_filename = config.new_data_dir_name + filenames[i]
+        full_filename = current_data_dir + filenames[i]
         divider = {"filename": full_filename}
         labels = utils.load_file_only_labels(full_filename)
         # only load images if necessary
@@ -322,9 +327,10 @@ def get_inverse_proportions(data):
 
 
 def get_class_weights(test_data_size=0):
-    labels = utils.load_labels_only()
+    labels = utils.load_labels_only(current_data_dir)
     # remove last x rows
     labels = np.concatenate(labels, axis=0)
+    uesless, labels = convert_labels_to_time_pressed(range(100), labels)
     if test_data_size:
         labels = labels[:-test_data_size, :]
     labels = np.argmax(labels, axis=-1)
@@ -348,7 +354,7 @@ def test_sequence_data_no_mismatch():
 
 
 def test_divide_dataset():
-    filenames = utils.get_sorted_filenames()
+    filenames = utils.get_sorted_filenames(current_data_dir)
     if config.random_file_order_train:
         random.shuffle(filenames)
     filenames = divide_dataset(filenames, config.allowed_ram_mb, 10000, normalize_input_values=True,
@@ -358,7 +364,7 @@ def test_divide_dataset():
 
 
 def test_divide_cnn_only():
-    filenames = utils.get_sorted_filenames()
+    filenames = utils.get_sorted_filenames(current_data_dir)
     if config.random_file_order_train:
         random.shuffle(filenames)
     my_dict = divide_dataset_cnn_only(filenames, 30000, True, normalize_factor=config.known_normalize_growth,
@@ -370,9 +376,31 @@ def test_divide_cnn_only():
         for j in i["filenames"]:
             filesize += os.stat(j).st_size
         print((filesize * 4) // (1024 ** 2))
-        filesize = 0
+
+
+def convert_labels_to_time_pressed(images, labels):
+    fps_ratio = utils.get_fps_ratio()
+    new_labels = []
+    index_list = [1, 3, 4, 5]
+    dict_len = len(config.outputs)
+    for i in range(labels.shape[0] - fps_ratio):
+        new_label = np.zeros(config.output_classes)
+        index = np.argmax(labels[i])
+        temp = labels[i:i+fps_ratio]
+        temp = np.sum(temp, axis=0)
+        temp = temp[index] / fps_ratio
+        if temp <= config.counts_as_tap and index in index_list:
+            if index == 1: index = 0
+            else: index -= 2
+            new_label[index + dict_len] = 1
+        else:
+            new_label[index] = 1
+        new_labels.append(new_label)
+    new_labels = np.stack(new_labels, axis=0)
+    images = images[:-fps_ratio]
+    return images, new_labels
 
 
 if __name__ == "__main__":
-    train_model(False, freeze=True, load_saved_cnn=False)
-    # train_cnn_only(False)
+    # train_model(True, freeze=True, load_saved_cnn=False)
+    train_cnn_only(True, swap_output_layer=True)

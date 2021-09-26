@@ -11,9 +11,15 @@ from tensorflow import compat
 from tensorflow.keras.models import load_model
 from collect_training_data import key_check
 from lenet import create_neural_net
+from threading import Thread as Worker
 
 threshold_turn = 0
-t_time = 0
+t_time = 0.17
+
+
+def sleep_and_release(key, time_sleep):
+    time.sleep(time_sleep)
+    ReleaseKey(key)
 
 
 def release_all():
@@ -30,24 +36,24 @@ def forward():
     ReleaseKey(D)
 
 
-def right():
+def right(confidence):
     PressKey(D)
     ReleaseKey(A)
     ReleaseKey(S)
     ReleaseKey(W)
     if t_time != 0:
-        time.sleep(t_time)
-        ReleaseKey(D)
+        t1 = Worker(target=sleep_and_release, args=(D, t_time * max(0, 1 + np.log(confidence))))
+        t1.start()
 
 
-def left():
+def left(confidence):
     PressKey(A)
     ReleaseKey(W)
     ReleaseKey(S)
     ReleaseKey(D)
     if t_time != 0:
-        time.sleep(t_time)
-        ReleaseKey(A)
+        t1 = Worker(target=sleep_and_release, args=(A, t_time * max(0, 1 + np.log(confidence))))
+        t1.start()
 
 
 def backwards():
@@ -57,24 +63,24 @@ def backwards():
     ReleaseKey(D)
 
 
-def forward_left():
+def forward_left(confidence):
     PressKey(W)
     PressKey(A)
     ReleaseKey(S)
     ReleaseKey(D)
     if t_time != 0:
-        time.sleep(t_time)
-        ReleaseKey(A)
+        t1 = Worker(target=sleep_and_release, args=(A, t_time * max(0, 1 + np.log(confidence))))
+        t1.start()
 
 
-def forward_right():
+def forward_right(confidence):
     PressKey(W)
     PressKey(D)
     ReleaseKey(A)
     ReleaseKey(S)
     if t_time != 0:
-        time.sleep(t_time)
-        ReleaseKey(D)
+        t1 = Worker(target=sleep_and_release, args=(D, t_time * max(0, 1 + np.log(confidence))))
+        t1.start()
 
 
 def output_key(prediction):
@@ -83,19 +89,19 @@ def output_key(prediction):
 
     if prediction[max_idx] > threshold_turn:
         if max_idx == config.outputs["a"]:
-            left()
+            left(prediction[max_idx])
             output = "a"
         elif max_idx == config.outputs["wa"]:
-            forward_left()
+            forward_left(prediction[max_idx])
             output = "wa"
         elif max_idx == config.outputs["wd"]:
-            forward_right()
+            forward_right(prediction[max_idx])
             output = "wd"
         elif max_idx == config.outputs["s"]:
             backwards()
             output = "s"
         elif max_idx == config.outputs["d"]:
-            right()
+            right(prediction[max_idx])
             output = "d"
         elif max_idx == config.outputs["w"]:
             forward()
@@ -117,11 +123,11 @@ def show_screen():
     monitor = config.monitor
     while 1:
         img = np.asarray(sct.grab(monitor))     # output is bgra
-        img = cv2.resize(img, (int(config.width), int(config.height)))
-        img = cv2.resize(img, (800, 600))
+        """img = cv2.resize(img, (int(config.width), int(config.height)))
+        img = cv2.resize(img, (800, 600))"""
         # img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
         # no need to convert color as cv2 displays bgr as rgb, capture is in bgr
-        cv2.imshow('Car View 120x160', img)
+        cv2.imshow(f'Car View {config.width}x{config.height}', img)
         if cv2.waitKey(25) & 0xFF == ord('q'):
             cv2.destroyAllWindows()
             break
