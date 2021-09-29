@@ -14,11 +14,11 @@ from lenet import create_neural_net
 from threading import Thread as Worker
 
 threshold_turn = 0
-t_time = 0.17
+t_time = 0.04
 
 
-def sleep_and_release(key, time_sleep):
-    time.sleep(time_sleep)
+def sleep_and_release(key):
+    time.sleep(t_time)
     ReleaseKey(key)
 
 
@@ -36,23 +36,23 @@ def forward():
     ReleaseKey(D)
 
 
-def right(confidence):
+def right(short_press):
     PressKey(D)
     ReleaseKey(A)
     ReleaseKey(S)
     ReleaseKey(W)
-    if t_time != 0:
-        t1 = Worker(target=sleep_and_release, args=(D, t_time * max(0, 1 + np.log(confidence))))
+    if short_press:
+        t1 = Worker(target=sleep_and_release, args=(D,))
         t1.start()
 
 
-def left(confidence):
+def left(short_press):
     PressKey(A)
     ReleaseKey(W)
     ReleaseKey(S)
     ReleaseKey(D)
-    if t_time != 0:
-        t1 = Worker(target=sleep_and_release, args=(A, t_time * max(0, 1 + np.log(confidence))))
+    if short_press:
+        t1 = Worker(target=sleep_and_release, args=(A,))
         t1.start()
 
 
@@ -63,46 +63,53 @@ def backwards():
     ReleaseKey(D)
 
 
-def forward_left(confidence):
+def forward_left(short_press):
     PressKey(W)
     PressKey(A)
     ReleaseKey(S)
     ReleaseKey(D)
-    if t_time != 0:
-        t1 = Worker(target=sleep_and_release, args=(A, t_time * max(0, 1 + np.log(confidence))))
+    if short_press:
+        t1 = Worker(target=sleep_and_release, args=(A,))
         t1.start()
 
 
-def forward_right(confidence):
+def forward_right(short_press):
     PressKey(W)
     PressKey(D)
     ReleaseKey(A)
     ReleaseKey(S)
-    if t_time != 0:
-        t1 = Worker(target=sleep_and_release, args=(D, t_time * max(0, 1 + np.log(confidence))))
+    if short_press:
+        t1 = Worker(target=sleep_and_release, args=(D,))
         t1.start()
 
 
 def output_key(prediction):
+    # index_list = [1, 3, 4, 5]
     max_idx = np.argmax(prediction)
     output = ""
+    previous_output_size = 7
+    short_press = False
+    if max_idx >= previous_output_size:
+        short_press = True
+        if max_idx == previous_output_size: max_idx -= 6
+        else: max_idx -= 5
 
     if prediction[max_idx] > threshold_turn:
         if max_idx == config.outputs["a"]:
-            left(prediction[max_idx])
-            output = "a"
+            left(short_press)
+            output = "a" if not short_press else "short a"
         elif max_idx == config.outputs["wa"]:
-            forward_left(prediction[max_idx])
-            output = "wa"
+            forward_left(short_press)
+            output = "wa" if not short_press else "short wa"
         elif max_idx == config.outputs["wd"]:
-            forward_right(prediction[max_idx])
-            output = "wd"
+            forward_right(short_press)
+            output = "wd" if not short_press else "short wd"
         elif max_idx == config.outputs["s"]:
             backwards()
             output = "s"
         elif max_idx == config.outputs["d"]:
-            right(prediction[max_idx])
-            output = "d"
+            right(short_press)
+            output = "d" if not short_press else "short d"
         elif max_idx == config.outputs["w"]:
             forward()
             output = "w"
@@ -114,7 +121,8 @@ def output_key(prediction):
     else:
         forward()
         output = "w"
-    print("Prediction:", output, "Value", prediction[max_idx])
+    pred_value = prediction[max_idx] if not short_press else prediction[max_idx + 6] if max_idx == 1 else prediction[max_idx + 5]
+    print("Prediction:", output, "Value", pred_value)
 
 
 # noinspection PyTypeChecker
@@ -134,6 +142,7 @@ def show_screen():
 
 
 def main_with_lstm():
+    global t_time
     clear_session()
     config_var = compat.v1.ConfigProto()
     config_var.gpu_options.allow_growth = True
@@ -157,7 +166,7 @@ def main_with_lstm():
         img = cv2.resize(img, (config.width, config.height))
         # ! check again with new data
         img = img.reshape(config.height, config.width, config.color_channels)
-        img = utils.normalize_input_values(img, "float32")
+        # img = utils.normalize_input_values(img, "float32")
 
         if len(images) < config.sequence_len:
             images.append(img)
@@ -182,6 +191,12 @@ def main_with_lstm():
             release_all()
             images = []
             time.sleep(5)
+        if "X" in key:
+            t_time = max(0.01, t_time - 0.01)
+            print(t_time)
+        if "B" in key:
+            t_time = min(0.17, t_time + 0.01)
+            print(t_time)
 
 
 if __name__ == "__main__":

@@ -81,8 +81,23 @@ def save_untrained_model():
     model.save(name)
 
 
+def freeze_part_of_inception(model, layer_name="mixed9"):
+    # mixed8, mixed9
+    # this function is for a very specific model architecture, bunch of "magic" numbers
+    idx = 0
+    while True:     # is supposed to throw if specified name does not exist
+        if model.layers[1].layers[idx].name == layer_name: break
+        model.layers[1].layers[idx].trainable = False
+        idx += 1
+    optimizer = Adam(learning_rate=config.lr)
+    model.compile(loss='categorical_crossentropy', optimizer=optimizer, metrics=['accuracy'])
+    return model
+
+
 if __name__ == "__main__":
-    test_model_speed()
+    model = create_cnn_only()
+    model = freeze_part_of_inception(model, "mixed9")
+    model.summary()
 
 
 

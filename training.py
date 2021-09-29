@@ -1,6 +1,6 @@
 import numpy as np
 import tensorflow as tf
-from lenet import create_neural_net, create_cnn_only, replace_cnn_dense_layer
+from lenet import create_neural_net, create_cnn_only, replace_cnn_dense_layer, freeze_part_of_inception
 from tensorflow import compat
 import time
 from sklearn.utils import shuffle, class_weight
@@ -47,7 +47,7 @@ def train_model(load_saved, freeze=False, load_saved_cnn=False):
                          normalize_input_values=False, incorporate_fps=True)
 
 
-def train_cnn_only(load_saved, swap_output_layer=False):
+def train_cnn_only(load_saved, swap_output_layer=False, freeze_part=True):
     setup_tf()
     if load_saved:
         model = load_model(config.cnn_only_name)
@@ -55,6 +55,8 @@ def train_cnn_only(load_saved, swap_output_layer=False):
             model = replace_cnn_dense_layer(model)
     else:
         model = create_cnn_only()
+    if freeze_part:
+        model = freeze_part_of_inception(model, "mixed9")
     model.summary()
     cnn_only_training(model, False)
 
@@ -403,4 +405,4 @@ def convert_labels_to_time_pressed(images, labels):
 
 if __name__ == "__main__":
     # train_model(True, freeze=True, load_saved_cnn=False)
-    train_cnn_only(True, swap_output_layer=True)
+    train_cnn_only(False, swap_output_layer=False, freeze_part=True)
