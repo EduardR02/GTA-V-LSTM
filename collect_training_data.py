@@ -6,7 +6,7 @@ import time
 import os
 import pandas as pd
 from grabkeys import key_check
-from training import sequence_data
+from training_new import generate_timeseries
 import h5py
 from threading import Thread as Worker
 import config
@@ -14,7 +14,7 @@ import utils
 
 curr_file_index = 0
 gb_per_file = 2
-current_data_dir = config.stuck_data_dir_name
+current_data_dir = config.turns_data_dir_name
 
 
 def convert_output(key):
@@ -34,6 +34,23 @@ def convert_output(key):
     else:
         output[config.outputs["nothing"]] = 1
     # one hot np array
+    return output
+
+
+def convert_output_raw(key):
+    """
+    Converts the input to a label where each button that was pressed is recorded, not one hot
+    """
+    output = np.zeros(len(config.outputs_base))
+    if "W" in key:
+        output[config.outputs_base["w"]] = 1
+    if "A" in key:
+        output[config.outputs_base["a"]] = 1
+    if "S" in key:
+        output[config.outputs_base["s"]] = 1
+    if "D" in key:
+        output[config.outputs_base["d"]] = 1
+    # nothing output is not needed as each input is recorded individually, so if none are pressed all are 0
     return output
 
 
@@ -64,7 +81,7 @@ def main(only_fps_test_mode=False, no_pause_remove=True):
             img, label = get_image_and_label(sct)
             train_images.append(img)
             train_labels.append(label)
-            if len(train_labels) == 290 or len(train_labels) == config.sequence_len * utils.get_fps_ratio() - 10:
+            if len(train_labels) == 290 or len(train_labels) == (config.sequence_len - 1) * utils.get_fps_ratio() - 10:
                 print(len(train_labels))
             if len(train_labels) % 1000 == 0:
                 print(counter)
@@ -135,11 +152,12 @@ def save_with_hdf5(data_x, data_y):
     # both are lists of numpy array, retain structure but make it np array
     data_x = np.stack(data_x, axis=0)
     data_y = np.stack(data_y, axis=0)
+    # don't do chunks=True, it makes it giga slow
     if not os.path.isfile(filename):
         with h5py.File(filename, 'w') as hf:
-            hf.create_dataset("images", data=data_x, chunks=True,
+            hf.create_dataset("images", data=data_x,
                               maxshape=(None, config.height, config.width, config.color_channels))
-            hf.create_dataset("labels", data=data_y, chunks=True,
+            hf.create_dataset("labels", data=data_y,
                               maxshape=(None, config.output_classes))
     else:
         with h5py.File(filename, 'a') as hf:
@@ -162,23 +180,31 @@ def display_data(data):
 
 def show_training_data():
     # see what happens if you change height and width, don't mess up on reshaping for the neural net
-    images, labels = utils.load_file(current_data_dir + "240x180_rgb_20.h5")
-    images = np.stack(images, axis=0)
-    labels = np.stack(labels, axis=0)
+    images, labels = utils.load_file(current_data_dir + "240x180_rgb_2.h5")
+    classes = labels.shape[-1]
     print(images.shape, labels.shape)
-    tmep ,labels = sequence_data(images, labels, shuffle_bool=False, incorporate_fps=True)
-    print(images.shape, labels.shape)
+    timeseries = generate_timeseries(images, labels, shuffle=True, incorporate_fps=True)
+    images, labels = [], []
+    # unpack and reshape
+    for batch in timeseries:
+        img, lb = batch
+        images += [img]
+        labels += [lb]
+    images = np.concatenate(images)
+    labels = np.concatenate(labels)
+    # flatten time and batch dim
     images = images.reshape((-1, config.height, config.width, config.color_channels))
-    images = images[config.sequence_len*utils.get_fps_ratio()-utils.get_fps_ratio():]
+    labels = labels.reshape((-1, classes))
 
     print(images.shape)
-    # image_data_train, labels = sequence_data(training_data, shuffle_bool=True, incorporate_fps=True)
     i = 0
+    j = 0
     t = time.time()
     count_frames = 0
     while True:
         img = images[i]
-        label = np.argmax(labels[i])
+        j += 1 if i != 0 and i % config.sequence_len == 0 else 0
+        label = np.argmax(labels[j])
         for key, value in config.outputs.items():
             if value == label:
                 label = key
@@ -192,7 +218,7 @@ def show_training_data():
             count_frames = 0
         count_frames += 1
         i += 1
-        time.sleep(0.2)
+        # time.sleep(0.2)
         if len(images) <= i:
             break
         if cv2.waitKey(25) & 0xFF == ord('q'):
