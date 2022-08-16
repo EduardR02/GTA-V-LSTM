@@ -224,6 +224,53 @@ def main_with_lstm():
             print(t_time)
 
 
+def main_combined_model():
+    global t_time
+    setup_tf()
+    t = time.time()
+    # load pretrained CNN+LSTM model here
+    model = load_model(config.model_name)
+    print("Models took:", time.time() - t, "to load.")
+    model.summary()
+    sct = mss.mss()
+    counter = 0
+    t = time.time()
+    max_t_time = round(1.0 / utils.get_fps_ratio(), 2)  # round to 2 digits
+    images = []
+    while 1:
+        counter += 1
+        img = get_screencap_img(sct)
+
+        if len(images) < config.sequence_len:
+            images.append(img)
+        else:
+            images.pop(0)  # remove oldest image
+            images.append(img)  # always have last seq_len images, put newest image at the end
+            # create numpy array from list and reshape to correct dimensions, height, then width!!!!!!!!
+            input_arr = np.expand_dims(np.stack(images, axis=0), axis=0)
+            prediction = model.predict(input_arr)[0]
+            # press predicted keys and display prediction
+            output_key(prediction)
+        if (time.time() - t) >= 1:
+            print("fps:", counter)
+            counter = 0
+            t = time.time()
+        key = key_check()
+        if "T" in key:
+            release_all()
+            break
+        if "N" in key:
+            release_all()
+            images = []
+            time.sleep(5)
+        if "X" in key:
+            t_time = max(0.01, t_time - 0.01)
+            print(t_time)
+        if "B" in key:
+            t_time = min(max_t_time, t_time + 0.01)
+            print(t_time)
+
+
 def get_screencap_img(sct):
     img = np.asarray(sct.grab(config.monitor))  # in bgra format
     img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
