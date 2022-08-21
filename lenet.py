@@ -88,7 +88,7 @@ def replace_cnn_dense_layer(model):
     inputs = model.input
     # prep_inputs = preprocess_input(inputs)
     # model = Model(inputs=model.layers[-2].input, outputs=model.layers[-2].output)(prep_inputs)
-    model = Dense(config.output_classes, activation="softmax")(model.layers[-2].output)
+    model = Dense(len(config.outputs), activation="softmax")(model.layers[-2].output)
     model = Model(inputs=inputs, outputs=model)
     optimizer = Adam(learning_rate=config.cnn_lr)
     model.compile(loss='categorical_crossentropy', optimizer=optimizer, metrics=['accuracy'])
@@ -124,7 +124,7 @@ def freeze_part_of_inception(model, layer_name="mixed9"):
         model.layers[inception_layer].layers[idx].trainable = False
         idx += 1
     optimizer = Adam(learning_rate=config.cnn_lr)
-    model.compile(loss='mae', optimizer=optimizer, metrics=['mae'])
+    model.compile(loss='categorical_crossentropy', optimizer=optimizer, metrics=['accuracy'])
     # model.layers[inception_layer].summary()
     return model
 
@@ -140,7 +140,7 @@ def unfreeze_inception(model, full_unfreeze=False):
             layer.trainable = True
     optimizer = Adam(learning_rate=config.cnn_lr)
     # model.layers[-2].summary()
-    model.compile(loss='mae', optimizer=optimizer, metrics=['mae'])
+    model.compile(loss='categorical_crossentropy', optimizer=optimizer, metrics=['accuracy'])
     return model
 
 
@@ -187,10 +187,10 @@ def inception_with_preprocess_layer():
     cnn = cnn(prep_inputs)
     cnn = Dropout(0.3)(cnn)
     # when using mae or mse loss use the relu that maxes out at 1.0
-    cnn = Dense(len(config.outputs_base), activation=relu_limited)(cnn)
+    cnn = Dense(len(config.outputs), activation="softmax")(cnn)
     cnn = Model(inputs=inputs, outputs=cnn)
     optimizer = Adam(learning_rate=config.cnn_lr)
-    cnn.compile(loss='mae', optimizer=optimizer, metrics=['mae'])
+    cnn.compile(loss='categorical_crossentropy', optimizer=optimizer, metrics=['accuracy'])
     return cnn
 
 
