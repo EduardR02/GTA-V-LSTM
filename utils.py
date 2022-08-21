@@ -1,3 +1,4 @@
+import gc
 import os
 import random
 import config
@@ -89,13 +90,14 @@ def convert_labels_to_time_pressed(labels, images=None):
     return images, new_labels
 
 
-def concat_data_from_dict(filename_dict, concat=True):
+def concat_data_from_dict(filename_dict, concat=True, turns_or_stuck=False):
     images = []
     labels = []
+    offset = turns_or_stuck*300
     for filename in filename_dict["filenames"]:
         data_x, data_y = load_file(filename)
-        images += [data_x]
-        labels += [data_y]
+        images += [data_x[offset:]]
+        labels += [data_y[offset:]]
         del data_x, data_y
     if "start_index" in filename_dict:
         idx_start, idx_stop = filename_dict["start_index"], filename_dict["stop_index"]
@@ -307,6 +309,61 @@ def test_divide_dataset(dirs):
         print(entry)
 
 
+def load_balanced_and_convert_nothing_to_w(dirs, factor=2.0):
+    """
+    This method is for cnn training, which is why we want to convert "do nothing" to "w", because
+    the balance of w and nothing is essentially acceleration, which is hard to get from a still image,
+    it makes more sense to relay that task to the lstm, the indices could be written to a file for lstm training
+
+    Let's all pray together that this does not mess up the image and label index correlation
+    ( I checked manually through video label correlation, and it seems to be correct )
+    """
+    # randomly select indices of "w" after combining with "nothing" class
+    labels = load_labels_only(dirs)
+    labels = np.concatenate(labels, axis=0)
+    labels = convert_nothing_to_w_and_remove_it(labels)
+    # get indices of "w"
+    indices = np.where(labels[:,config.outputs["w"]] == 1)[0]
+    np.random.shuffle(indices)
+    # remove random w indices so that w has at max factor samples
+    class_counts = np.sum(labels, axis=0)
+    class_count_limit = round(np.min(class_counts) * factor)
+    indices = indices[class_count_limit:]
+    indices.sort()
+    # remove "w" indices from labels
+    labels = np.delete(labels, indices, axis=0)
+    # remove "w" indices from images
+    # assigns values here to avoid memory expensive concatenation
+    images = np.zeros(dtype=np.uint8, shape=(labels.shape[0], config.height, config.width, config.color_channels))
+    filenames = get_sorted_filenames(dirs)
+    # keep track of index shift in array of indices to remove
+    idx_shift = 0
+    # keep track of index shift in array to assign to (images)
+    idx_shift_filtered = 0
+    # load files and filter out "w" indices given the factor
+    for filename in filenames:
+        with h5py.File(filename, "r") as hf:
+            curr_imgs = hf.get("images")
+            # find last index of "w" in current file to be removed
+            curr_idx = np.searchsorted(indices, curr_imgs.shape[0] + idx_shift, side="left")
+            # remove "w" indices from current file
+            # shift by idx_shift_filtered to account for idx position in indices array and
+            # -idx_shift to account for total index shift relative to all indices
+            # print(curr_idx, idx_shift, idx_shift_filtered, idx_shift - idx_shift_filtered)
+            indices_to_remove = (indices[idx_shift - idx_shift_filtered:curr_idx] - idx_shift)
+            filtered_imgs = np.delete(curr_imgs, indices_to_remove, axis=0)
+            # assign filtered images to array of images with the correct index shift
+            if len(filtered_imgs) > 0:
+                images[idx_shift_filtered:idx_shift_filtered+filtered_imgs.shape[0]] = filtered_imgs
+            # increment index shifts
+            idx_shift += curr_imgs.shape[0]
+            idx_shift_filtered += filtered_imgs.shape[0]
+            del curr_imgs, filtered_imgs
+            gc.collect()
+    print("images shape:", images.shape, "labels shape:", labels.shape)
+    return images, labels
+
+
 def get_inverse_proportions(data):
     print(len(data))
     x = np.sum(data, axis=0)     # sum each label for each timestep separately
@@ -316,6 +373,17 @@ def get_inverse_proportions(data):
     print(x)
     print(x.shape)
     return x
+
+
+def convert_nothing_to_w_and_remove_it(labels):
+    y = np.zeros(labels[0].shape)
+    y[config.outputs["w"]] = 1
+    nothing_idx = config.outputs["nothing"]
+    for i in range(len(labels)):
+        if labels[i][nothing_idx] != 0:
+            labels[i] = y
+    labels = labels[:, :-1]
+    return labels
 
 
 def load_training_file_list(filename):
@@ -329,12 +397,8 @@ def get_fps_ratio():
 
 
 if __name__ == "__main__":
-    labels = load_labels_only([config.new_data_dir_name])
-    labels = np.concatenate(labels)
-    labels = convert_labels_to_binary(labels)
-    labels, _ = convert_bin_labels_to_mse(labels)
-    print(np.sum(labels) / labels.shape[0])
-    #labels = convert_any_labels_to_max_of_next(labels, get_fps_ratio())"""
-    print(labels[:100])
-    class_weights = get_class_weights_bin("don't care", labels=labels)
-    print(class_weights)
+    #load filename 1 in new_data_dir
+    x, y = load_balanced_and_convert_nothing_to_w([config.new_data_dir_name, config.turns_data_dir_name, config.stuck_data_dir_name], 2.25)
+    print(x[0])
+    print(x[10000])
+    print(x[-1])
