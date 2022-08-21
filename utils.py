@@ -67,6 +67,12 @@ def generate_sample_weights_from_class_weight_dict(labels, class_weights):
 
 
 def convert_labels_to_time_pressed(labels, images=None):
+    """
+    This function modifies the inputs labels( adds additional classes) to distinguish between short and long presses
+    :param labels: expected to be np array of shape (samples, outputs), where outputs matches the outputs dict
+    :param images: if provided, the function will remove the last fps_ratio images because the labels for them
+    cannot be determined
+    """
     fps_ratio = get_fps_ratio()
     new_labels = []
     index_list = [1, 3, 4, 5]
@@ -91,8 +97,17 @@ def convert_labels_to_time_pressed(labels, images=None):
 
 
 def concat_data_from_dict(filename_dict, concat=True, turns_or_stuck=False):
+    """
+    Loads and concatenates data from the filename_dict into a np array, potentially clipping the last file
+    if a clipping index is provided in the filename_dict
+    :param filename_dict: dictionary of filenames and indices to clip from the last file, has to contain "filenames" key
+    :param concat: if True, concatenates the data from the files, otherwise returns the data as a list of np arrays
+    :param turns_or_stuck:e adds an offset, not taking into account indexing (start stop index)
+    """
     images = []
     labels = []
+    # this offset is necessary because I have data for the lstm that does nothing for the first 300 frames
+    # this is a bad way to do this because it does not take into account any indexing, but for my needs it's enough
     offset = turns_or_stuck*300
     for filename in filename_dict["filenames"]:
         data_x, data_y = load_file(filename)
@@ -240,20 +255,27 @@ def calc_filesize(full_filename):
     return file_size_mb
 
 
-def get_class_weights(dirs, test_data_size=0, labels=None, convert_time_pressed=False):
+def get_class_weights(dirs, test_data_size=0, labels=None, convert_time_pressed=False, factor=1.0):
     if labels is None:
         labels = load_labels_only(dirs)
-        # remove last x rows
         labels = np.concatenate(labels, axis=0)
     if convert_time_pressed:
         _, labels = convert_labels_to_time_pressed(labels)
 
     if test_data_size:
+        # dont account for test data in calculation
         labels = labels[:-test_data_size]
     num_classes = labels.shape[-1]
     labels = np.argmax(labels, axis=-1)
     classes = np.asarray(range(num_classes))
+    # could technically throw if a class does not have a single instance ( i think, maybe not)
+    # this is too annoying to fix for such an unlikely scenario
     inverse_proportions = class_weight.compute_class_weight('balanced', classes=classes, y=labels)
+    for i in range(inverse_proportions.shape[0]):
+        if inverse_proportions[i] > 1.0:
+            inverse_proportions[i] /= factor
+        else:
+            inverse_proportions[i] *= factor
     inverse_proportions = dict(enumerate(inverse_proportions))
     del labels
     return inverse_proportions
@@ -317,6 +339,8 @@ def load_balanced_and_convert_nothing_to_w(dirs, factor=2.0):
 
     Let's all pray together that this does not mess up the image and label index correlation
     ( I checked manually through video label correlation, and it seems to be correct )
+
+    Currently, this function loads the data because after balancing it fits into memory, if that changes need to rewrite
     """
     # randomly select indices of "w" after combining with "nothing" class
     labels = load_labels_only(dirs)
@@ -397,8 +421,4 @@ def get_fps_ratio():
 
 
 if __name__ == "__main__":
-    #load filename 1 in new_data_dir
-    x, y = load_balanced_and_convert_nothing_to_w([config.new_data_dir_name, config.turns_data_dir_name, config.stuck_data_dir_name], 2.25)
-    print(x[0])
-    print(x[10000])
-    print(x[-1])
+    print(get_class_weights([config.new_data_dir_name, config.turns_data_dir_name, config.turns_data_dir_name], factor=2))

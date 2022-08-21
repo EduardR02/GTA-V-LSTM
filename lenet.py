@@ -88,7 +88,7 @@ def replace_cnn_dense_layer(model):
     inputs = model.input
     # prep_inputs = preprocess_input(inputs)
     # model = Model(inputs=model.layers[-2].input, outputs=model.layers[-2].output)(prep_inputs)
-    model = Dense(len(config.outputs), activation="softmax")(model.layers[-2].output)
+    model = Dense(config.output_classes, activation="softmax")(model.layers[-2].output)
     model = Model(inputs=inputs, outputs=model)
     optimizer = Adam(learning_rate=config.cnn_lr)
     model.compile(loss='categorical_crossentropy', optimizer=optimizer, metrics=['accuracy'])
@@ -187,7 +187,7 @@ def inception_with_preprocess_layer():
     cnn = cnn(prep_inputs)
     cnn = Dropout(0.3)(cnn)
     # when using mae or mse loss use the relu that maxes out at 1.0
-    cnn = Dense(len(config.outputs), activation="softmax")(cnn)
+    cnn = Dense(config.output_classes, activation="softmax")(cnn)
     cnn = Model(inputs=inputs, outputs=cnn)
     optimizer = Adam(learning_rate=config.cnn_lr)
     cnn.compile(loss='categorical_crossentropy', optimizer=optimizer, metrics=['accuracy'])

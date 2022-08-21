@@ -39,7 +39,8 @@ def train_model(load_saved):
                          shuffle=True, hold_data_in_mem=True, saved_file_order=False)
 
 
-def train_cnn_only(load_saved, swap_output_layer=False, freeze_part=True):
+def train_cnn_only(load_saved, swap_output_layer=False, freeze_part=True,
+                   use_class_weights=True, saved_file_order=False):
     setup_tf()
     if load_saved:
         model = load_model(config.cnn_only_name)
@@ -51,15 +52,14 @@ def train_cnn_only(load_saved, swap_output_layer=False, freeze_part=True):
         model = freeze_part_of_inception(model, "mixed9")
         # model = freeze_part_of_inception(model, "mixed10")  # full freeze
     else:
-        model = unfreeze_inception(model)
+        model = unfreeze_inception(model, full_unfreeze=True)
     model.summary()
-    cnn_only_training(model, 40000, shuffle=True)
+    cnn_only_training(model, 30000, shuffle=True, use_class_weights=use_class_weights,
+                      saved_file_order=saved_file_order)
 
 
 def custom_training_loop(model, test_data_size, save_every_epoch, incorporate_fps=True, shuffle=True,
                          hold_data_in_mem=False, saved_file_order=False):
-    """log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1)"""
     class_weights = utils.get_class_weights(current_data_dirs, test_data_size=0)
     if not saved_file_order:
         filenames = utils.get_sorted_filenames(current_data_dirs)
@@ -83,7 +83,7 @@ def custom_training_loop(model, test_data_size, save_every_epoch, incorporate_fp
                 sequenced_data = get_sequenced_data(filename_dict_list[i], incorporate_fps, shuffle=shuffle)
             print(f"Epoch: {epoch}; Files: {len(filename_dict_list[i]['filenames'])};"
                   f" {len(filename_dict_list) - i} out of {len(filename_dict_list)} file groups to go!")
-            # test data is always last, meaning if next doesn't exists it's the test data
+            # test data is always last, meaning if next doesn't exist it's the test data
             if not filename_dict_list[i]["is_test"]:
                 # validation does not make sense if you shuffle in the generator
                 model.fit(sequenced_data, epochs=epoch + 1,
@@ -103,42 +103,51 @@ def custom_training_loop(model, test_data_size, save_every_epoch, incorporate_fp
     model.save(config.model_name + "_fully_trained")
 
 
-def cnn_only_training(model, test_data_size, shuffle=True):
-    # class_weights = utils.get_class_weights(current_data_dirs, test_data_size=test_data_size, convert_time_pressed=False)
+def cnn_only_training(model, test_data_size, shuffle=True, use_class_weights=True, saved_file_order=False):
     filenames = utils.get_sorted_filenames(current_data_dirs)
-    if shuffle:
+    class_weights_factor = 2.0
+    if config.random_file_order_train:
         random.shuffle(filenames)
-    filename_dict_list = utils.divide_dataset_lstm_compatible(filenames, test_data_size,
-                                                              allowed_ram=config.allowed_ram_mb)
-    filename_dict_list = utils.load_training_file_list("data/train_data_dict_list_cnn.txt")
+    if saved_file_order:
+        filename_dict_list = utils.load_training_file_list("data/train_data_dict_list_cnn.txt")
+    else:
+        filename_dict_list = utils.divide_dataset_lstm_compatible(filenames, test_data_size,
+                                                                  allowed_ram=config.allowed_ram_mb)
     for k in filename_dict_list:
         print(k)
     for epoch in range(config.epochs):
         for filename_dict in filename_dict_list:
             K.clear_session()
-            images, labels = utils.concat_data_from_dict(filename_dict)
-            labels = utils.convert_labels_to_binary(labels)
-            labels, images = utils.convert_bin_labels_to_mse(labels, images=images)
-            class_weights = utils.get_class_weights("doesnt matter", labels=labels, convert_time_pressed=False)
-            if epoch == 0:
-                print("class weights for filenames:", class_weights)
+            images, labels = utils.concat_data_from_dict(filename_dict
+                                                         # , turns_or_stuck=True
+                                                         )
             # images, labels = utils.convert_labels_to_time_pressed(labels, images=images)
+            labels = utils.convert_nothing_to_w_and_remove_it(labels)
             if not filename_dict["is_test"]:
-                dataset = data_augmentation.get_augmented_dataset(images, labels)
-                model.fit(dataset,
-                          epochs=epoch + 1, initial_epoch=epoch,
-                          class_weight=class_weights,
-                          )
+                dataset = data_augmentation.get_augmented_dataset(images, labels, shuffle=shuffle)
+                if use_class_weights:
+                    class_weights = utils.get_class_weights("doesnt matter", labels=labels,
+                                                            convert_time_pressed=False, factor=class_weights_factor)
+                    if epoch == 0:
+                        print("class weights for filenames:", class_weights)
+                    model.fit(dataset, epochs=epoch + 1, initial_epoch=epoch, class_weight=class_weights)
+                else:
+                    model.fit(dataset, epochs=epoch + 1, initial_epoch=epoch)
                 del dataset
             else:
                 with tf.device("CPU:0"):
                     images, labels = tf.convert_to_tensor(images), tf.convert_to_tensor(labels)
-                # mimic training loss function
-                sample_weights = utils.generate_sample_weights_from_class_weight_dict(labels, class_weights)
-                model.evaluate(images, labels, batch_size=config.CNN_ONLY_BATCH_SIZE, sample_weight=sample_weights)
+                if use_class_weights:
+                    # mimic training loss function
+                    class_weights = utils.get_class_weights("doesnt matter", labels=labels,
+                                                            convert_time_pressed=False, factor=class_weights_factor)
+                    sample_weights = utils.generate_sample_weights_from_class_weight_dict(labels, class_weights)
+                    model.evaluate(images, labels, batch_size=config.CNN_ONLY_BATCH_SIZE, sample_weight=sample_weights)
+                else:
+                    model.evaluate(images, labels, batch_size=config.CNN_ONLY_BATCH_SIZE)
                 print("augmented eval:")
-                dataset = data_augmentation.get_augmented_dataset(images, labels)
-                model.evaluate(dataset)     # sample weight not supported when using dataset ( cringe )
+                dataset = data_augmentation.get_augmented_dataset(images, labels, shuffle=False)
+                model.evaluate(dataset)  # sample weight not supported when using dataset ( cringe )
                 del dataset
             del images, labels
             gc.collect()
@@ -200,4 +209,4 @@ def test_generate_time_series():
 
 if __name__ == "__main__":
     # train_model(load_saved=False)
-    train_cnn_only(load_saved=False, swap_output_layer=False, freeze_part=True)
+    train_cnn_only(load_saved=True, swap_output_layer=False, freeze_part=True)

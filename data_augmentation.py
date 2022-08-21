@@ -34,7 +34,7 @@ def visualize(original, augmented):
     plt.show()
 
 
-def get_augmented_dataset(images, labels):
+def get_augmented_dataset(images, labels, shuffle=True):
     AUTOTUNE = tf.data.AUTOTUNE
     r_rotate = random_rotation()
     r_zoom = random_zoom()
@@ -68,12 +68,18 @@ def get_augmented_dataset(images, labels):
             return img, label
 
     with tf.device("CPU:0"):
-        dataset = (dataset.shuffle(1000)
-                   .map(seed_update_wrapper, num_parallel_calls=AUTOTUNE)
-                   .batch(config.CNN_ONLY_BATCH_SIZE)
-                   .shuffle(100)
-                   .prefetch(AUTOTUNE)
-                   )
+        if shuffle:
+            dataset = (dataset.shuffle(1000)
+                       .map(seed_update_wrapper, num_parallel_calls=AUTOTUNE)
+                       .batch(config.CNN_ONLY_BATCH_SIZE)
+                       .shuffle(100)
+                       .prefetch(AUTOTUNE)
+                       )
+        else:
+            dataset = (dataset.map(seed_update_wrapper, num_parallel_calls=AUTOTUNE)
+                       .batch(config.CNN_ONLY_BATCH_SIZE)
+                       .prefetch(AUTOTUNE)
+                       )
     return dataset
 
 
