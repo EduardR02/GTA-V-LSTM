@@ -1,13 +1,60 @@
 import matplotlib.pyplot as plt
 import config
 import utils
-from tensorflow.keras.layers.experimental.preprocessing import RandomContrast, RandomRotation, RandomZoom
-import tensorflow as tf
 import numpy as np
 import time
+import albumentations as A
+import torch
+import cv2
 
 
-# amazing doc: https://www.tensorflow.org/tutorials/images/data_augmentation
+# Imagenet mean and std used in dinov2 training
+ADE_MEAN = (0.485, 0.456, 0.406)
+ADE_STD = (0.229, 0.224, 0.225)
+
+
+def stack_and_convert(x, y, classifier_type, id2label):
+    x = np.stack(x, axis=0)
+    y = np.stack(y, axis=0)
+    x = torch.from_numpy(x).permute(0, 3, 1, 2)
+    y = torch.from_numpy(y)
+    y_for_metrics = y
+    if classifier_type == "seg_bce":
+        # +1 because we already removed the background class in id2label
+        y = torch.nn.functional.one_hot(y.long(), num_classes=len(id2label) + 1).permute(0, 3, 1, 2)
+        # remove the class 0 (background), we have B, C, H, W , so remove the first one from C
+        y = y[:, 1:]
+    if classifier_type == "seg_cce":
+        y = y.long()
+    else:
+        y = y.float()
+    return x, y, y_for_metrics
+
+
+def expand_imgs(imgs):
+    # expand the images to 3 channels
+    imgs = [np.stack([img, img, img], axis=-1) if len(img.shape) < 3 else img for img in imgs]
+    return imgs
+
+
+train_transform = A.Compose([
+    A.PadIfNeeded(min_height=224, min_width=896, border_mode=cv2.BORDER_CONSTANT, value=0),
+    A.RandomCrop(height=224, width=896),
+    # A.Resize(width=448, height=448),
+    A.HorizontalFlip(p=0.5),
+    A.VerticalFlip(p=0.5),
+    A.RandomBrightnessContrast(p=0.5),
+    A.Normalize(mean=ADE_MEAN, std=ADE_STD),
+])
+
+val_transform = A.Compose([
+    A.PadIfNeeded(min_height=224, min_width=896, border_mode=cv2.BORDER_CONSTANT, value=0),
+    A.RandomCrop(height=224, width=896),
+    # A.Resize(width=448, height=448),
+    A.Normalize(mean=ADE_MEAN, std=ADE_STD),
+
+])
+
 
 
 def random_contrast():

@@ -5,10 +5,7 @@ import time
 import utils
 from keys import PressKey, ReleaseKey, W, A, S, D
 import config
-from tensorflow.keras.backend import clear_session
-from tensorflow import compat
-from tensorflow.keras.models import load_model
-from lenet import inception_expose_feature_layer, lstm_only
+
 from grabkeys import key_check
 from threading import Thread as Worker
 
@@ -230,7 +227,7 @@ def main_combined_model():
     t = time.time()
     # load pretrained CNN+LSTM model here
     model = load_model(config.model_name)
-    print("Models took:", time.time() - t, "to load.")
+    print("Model took:", time.time() - t, "to load.")
     model.summary()
     sct = mss.mss()
     counter = 0

@@ -422,3 +422,8 @@ def get_fps_ratio():
 
 if __name__ == "__main__":
     print(get_class_weights([config.new_data_dir_name, config.turns_data_dir_name, config.turns_data_dir_name], factor=2))
+    x = load_labels_only([config.new_data_dir_name, config.turns_data_dir_name, config.turns_data_dir_name])
+    x = np.concatenate(x, axis=0)
+    x = convert_nothing_to_w_and_remove_it(x)
+    x = np.sum(x, axis=0)
+    print(x[0] / sum(x))

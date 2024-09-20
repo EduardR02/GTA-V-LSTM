@@ -1,159 +1,293 @@
 import numpy as np
-import tensorflow as tf
-from lenet import lstm_only
-from tensorflow import compat
-from tensorflow.keras.preprocessing import timeseries_dataset_from_array
-from lenet import inception_with_preprocess_layer, replace_cnn_dense_layer, freeze_part_of_inception, unfreeze_inception
-from tensorflow.keras.models import load_model
-from tensorflow.keras import backend as K
-import time
 import config
 import utils
-import random
-import gc
-import data_augmentation
+import torch
+import os
+from contextlib import nullcontext
+from dataloader import get_dataloader
+from model import Dinov2ForClassification
+import matplotlib.pyplot as plt
+import math
+import time
 
-current_data_dirs = [config.new_data_dir_name, config.turns_data_dir_name, config.stuck_data_dir_name]  # has to be list
-
-
-def setup_tf():
-    tf.keras.backend.clear_session()
-    config_var = compat.v1.ConfigProto()
-    config_var.gpu_options.per_process_gpu_memory_fraction = 1.0
-    config_var.gpu_options.allow_growth = True
-    compat.v1.InteractiveSession(config=config_var)
-    gpus = tf.config.experimental.list_physical_devices('GPU')
-    for gpu in gpus:
-        tf.config.experimental.set_memory_growth(gpu, True)
+current_data_dirs = [config.turns_data_dir_name, config.stuck_data_dir_name, config.new_data_dir_name]  # has to be list
 
 
-def train_model(load_saved):
-    setup_tf()
-    if load_saved:
-        model = load_model(config.model_name)
+print(torch.backends.cudnn.version())
+print(torch.version.cuda)
+# -----------------------------------------------------------------------------
+# default config values designed to train a gpt2 (124M) on OpenWebText
+# I/O
+out_dir = os.path.join('models', 'test')
+eval_interval = 50
+log_interval = 1
+eval_iters = 8
+eval_only = False # if True, script exits right after the first eval
+always_save_checkpoint = True # if True, always save a checkpoint after each eval
+fine_tune = False   # train the entire model or just the top
+init_from = 'scratch' # 'scratch' or 'resume'
+classifier_type = "seg_binary_bce" # "seg_cce" or "seg_bce" or "seg_binary_bce" or "bce"
+dino_size = "base"
+checkpoint_name = "ckpt.pt"
+metrics_name = "metrics_plot.png"
+gradient_accumulation_steps = 1 # used to simulate larger batch sizes
+batch_size = 38 # if gradient_accumulation_steps > 1, this is the micro-batch size
+train_split = 0.95   # test val split, important to keep it to reproduce obv
+convert_to_greyscale = False
+
+# adamw optimizer
+learning_rate = 3e-4 # max learning rate
+max_iters = 60000 # total number of training iterations
+# optimizer settings
+weight_decay = 1e-1
+beta1 = 0.9
+beta2 = 0.995
+grad_clip = 0.0 # clip gradients at this value, or disable if == 0.0
+# learning rate decay settings
+decay_lr = True # whether to decay the learning rate
+warmup_iters = 400 # how many steps to warm up for
+lr_decay_iters = 10000 # should be ~= max_iters per Chinchilla
+min_lr = 5e-6 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+# DDP settings
+backend = 'nccl' # 'nccl', 'gloo', etc.
+# system
+device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
+# change this to bf16 if your gpu actually supports it
+dtype = 'float16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
+compile = False # use PyTorch 2.0 to compile the model to be faster
+# -----------------------------------------------------------------------------
+config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
+config = {k: globals()[k] for k in config_keys} # will be useful for logging
+
+
+os.makedirs(out_dir, exist_ok=True)
+torch.manual_seed(1337)
+torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
+torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
+device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
+# note: float16 data type will automatically use a GradScaler
+ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
+ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+
+
+id2label = {0: "w", 1: "a", 2: "s", 3: "d"}
+
+
+train_dataloader = get_dataloader(current_data_dirs, batch_size, train_split, True, shuffle=True)
+val_dataloader = get_dataloader(current_data_dirs, batch_size, train_split, False, shuffle=True)
+
+
+iter_num = 0
+best_val_loss = 1e9
+iter_num_on_load = 0
+non_segment = classifier_type == "bce"
+model = optimizer = scaler = None
+
+
+def load_model():
+    global model, optimizer, scaler, iter_num, best_val_loss, iter_num_on_load
+    if init_from == 'scratch':
+        print("Initializing a new model from scratch")
+        model = Dinov2ForClassification.from_pretrained(
+            f"facebook/dinov2-{dino_size}", id2label=id2label, num_labels=len(id2label))
+    elif init_from == 'resume':
+        print(f"Resuming training from {out_dir}")
+        ckpt_path = os.path.join(out_dir, checkpoint_name)
+        checkpoint = torch.load(ckpt_path, map_location=device)
+        model = Dinov2ForClassification.from_pretrained(
+            f"facebook/dinov2-{dino_size}", id2label=id2label, num_labels=len(id2label))
+        state_dict = checkpoint['model']
+        # fix the keys of the state dictionary :(
+        # honestly no idea how checkpoints sometimes get this prefix, have to debug more
+        unwanted_prefix = '_orig_mod.'
+        for k,v in list(state_dict.items()):
+            if k.startswith(unwanted_prefix):
+                state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+        model.load_state_dict(state_dict)
+        iter_num = checkpoint['iter_num']
+        iter_num_on_load = iter_num
+        best_val_loss = checkpoint['best_val_loss']
+        del state_dict  # very important to clear this checkpoint reference
+
+    # freeze or unfreeze model
+    for name, param in model.named_parameters():
+        if name.startswith("dinov2"):
+            param.requires_grad = fine_tune
+        # maybe also freeze layernorm no matter what here
+
+    print(sum(p.numel() for p in model.parameters() if p.requires_grad))
+
+    model.to(device)
+
+    # initialize a GradScaler. If enabled=False scaler is a no-op
+    scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+
+    # optimizer
+    optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
+    if init_from == 'resume':
+        try:
+            optimizer.load_state_dict(checkpoint['optimizer'])
+        except Exception as e:
+            print(e)
+            print("Probably trying to fine-tune full model after resuming from only last layer tuned model, proceeding with reset iter num for learning rate warmup.")
+            iter_num = 0
+        # iter_num = 0
+        # Issue when loading model VRAM usage is higher, therefore OOMs with same params
+        # https://discuss.pytorch.org/t/gpu-memory-usage-increases-by-90-after-torch-load/9213/3
+        del checkpoint  # dereference seems crucial
+        torch.cuda.empty_cache()
+
+    # compile the model
+    if compile:
+        print("compiling the model... (takes a ~minute)")
+        model = torch.compile(model)    # requires PyTorch 2.0
+
+    return model
+
+
+@torch.no_grad()
+def estimate_loss(model):
+    out = {}
+    model.eval()
+    for split in ['train', 'val']:
+        dataloader_iter = iter(train_dataloader if split == 'train' else val_dataloader)
+        losses = torch.zeros(eval_iters * gradient_accumulation_steps)
+        for k in range(eval_iters * gradient_accumulation_steps):
+            X, Y = get_batch(dataloader_iter)
+            with ctx:
+                logits, loss = model(X, labels=Y)
+            losses[k] = loss.item()
+        out[split] = losses.mean()
+    model.train()
+    return out
+
+
+# https://stackoverflow.com/questions/11352047/finding-moving-average-from-data-points-in-python
+def moving_average(data, window_size):
+    cumsum_vec = np.cumsum(np.insert(data, 0, 0))
+    return (cumsum_vec[window_size:] - cumsum_vec[:-window_size]) / window_size
+
+
+def plot_metrics(metrics, window_size=50):
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+
+    # Plot training loss and validation loss
+    ax1.plot(range(len(metrics["losses"])), metrics["losses"], label='Training Loss', color='blue', alpha=0.3)
+    smoothed_losses = moving_average(metrics["losses"], window_size)
+    half_window = window_size // 2
+    ax1.plot(range(half_window-1, len(metrics["losses"]) - half_window), smoothed_losses, label='Smoothed Training Loss', color='blue')
+
+    ax1.plot(metrics["val_loss_iters"], metrics["val_losses"], label='Validation Loss', color='red', linestyle='dashed', marker='o')
+    ax1.set_xlabel('Iteration')
+    ax1.set_ylabel('Loss')
+    ax1.legend(loc='upper left')
+    ax1.set_title('Training Metrics')
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, metrics_name))
+    plt.close(fig)
+
+
+# learning rate decay scheduler (cosine with warmup)
+def get_lr(it):
+    # 1) linear warmup for warmup_iters steps
+    if it < warmup_iters:
+        return learning_rate * it / warmup_iters
+    # 2) if it > lr_decay_iters, return min learning rate
+    if it > lr_decay_iters:
+        return min_lr
+    # 3) in between, use cosine decay down to min learning rate
+    decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
+    assert 0 <= decay_ratio <= 1
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
+    return min_lr + coeff * (learning_rate - min_lr)
+
+
+def get_batch(dataloader_iter):
+    x, y = next(dataloader_iter)
+    if device_type == 'cuda':
+        # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
+        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
     else:
-        model = lstm_only(many_to_many=False)
-    model.summary()
-    random.seed(time.time())
-    custom_training_loop(model, 40000, save_every_epoch=False, incorporate_fps=True,
-                         shuffle=True, hold_data_in_mem=True, saved_file_order=False)
+        x, y = x.to(device), y.to(device)
+    return x, y
 
 
-def train_cnn_only(load_saved, swap_output_layer=False, freeze_part=True,
-                   use_class_weights=True, saved_file_order=False):
-    setup_tf()
-    if load_saved:
-        model = load_model(config.cnn_only_name)
-        if swap_output_layer:
-            model = replace_cnn_dense_layer(model)
-    else:
-        model = inception_with_preprocess_layer()
-    if freeze_part:
-        model = freeze_part_of_inception(model, "mixed9")
-        # model = freeze_part_of_inception(model, "mixed10")  # full freeze
-    else:
-        model = unfreeze_inception(model, full_unfreeze=True)
-    model.summary()
-    cnn_only_training(model, 30000, shuffle=True, use_class_weights=use_class_weights,
-                      saved_file_order=saved_file_order)
+def train_loop():
+    global iter_num, best_val_loss
+    t0 = time.time()
+    local_iter_num = 0 # number of iterations in the lifetime of this process
+    metrics_dict = {"losses": [], "val_losses": [], "val_loss_iters": []}
+    model = load_model()
+    dataloader_iter = iter(train_dataloader)
+    X, Y = get_batch(dataloader_iter)
+    while True:
+        # determine and set the learning rate for this iteration
+        lr = get_lr(iter_num) if decay_lr else learning_rate
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
 
+        # evaluate the loss on train/val sets and write checkpoints
+        if iter_num % eval_interval == 0 and iter_num != iter_num_on_load and iter_num != 0:
+            losses = estimate_loss(model)
+            metrics_dict["val_losses"].append(losses["val"])
+            metrics_dict["val_loss_iters"].append(local_iter_num)
+            print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+            if losses['val'] < best_val_loss or always_save_checkpoint:
+                best_val_loss = losses['val'] if losses['val'] < best_val_loss else best_val_loss
+                if iter_num > 0:
+                    checkpoint = {
+                        'model': model.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'iter_num': iter_num,
+                        'best_val_loss': best_val_loss,
+                        'config': config,
+                    }
+                    print(f"saving checkpoint to {out_dir}")
+                    torch.save(checkpoint, os.path.join(out_dir, checkpoint_name))
+                    if best_val_loss == losses['val']:
+                        torch.save(checkpoint, os.path.join(out_dir, checkpoint_name.split(".")[0] + "-best." + checkpoint_name.split(".")[1]))
+            plot_metrics(metrics_dict)
+        if iter_num == 0 and eval_only:
+            break
 
-def custom_training_loop(model, test_data_size, save_every_epoch, incorporate_fps=True, shuffle=True,
-                         hold_data_in_mem=False, saved_file_order=False):
-    class_weights = utils.get_class_weights(current_data_dirs, test_data_size=0)
-    if not saved_file_order:
-        filenames = utils.get_sorted_filenames(current_data_dirs)
-        if config.random_file_order_train:
-            random.shuffle(filenames)
-        filename_dict_list = utils.divide_dataset_lstm_compatible(filenames, test_data_size, config.allowed_ram_mb,
-                                                                  incorporate_fps=incorporate_fps)
-    else:
-        filename_dict_list = utils.load_training_file_list("data/train_data_dict_list_lstm.txt")
-    dataset_list = []
-    if hold_data_in_mem:
-        dataset_list = gen_data_from_dict_list(filename_dict_list, incorporate_fps, shuffle)
-    for k in filename_dict_list:
-        print(k)
-    for epoch in range(config.epochs):
-        for i in range(len(filename_dict_list)):
-            K.clear_session()
-            if hold_data_in_mem:
-                sequenced_data = dataset_list[i]
-            else:
-                sequenced_data = get_sequenced_data(filename_dict_list[i], incorporate_fps, shuffle=shuffle)
-            print(f"Epoch: {epoch}; Files: {len(filename_dict_list[i]['filenames'])};"
-                  f" {len(filename_dict_list) - i} out of {len(filename_dict_list)} file groups to go!")
-            # test data is always last, meaning if next doesn't exist it's the test data
-            if not filename_dict_list[i]["is_test"]:
-                # validation does not make sense if you shuffle in the generator
-                model.fit(sequenced_data, epochs=epoch + 1,
-                          # class_weight=class_weights,
-                          initial_epoch=epoch, shuffle=shuffle
-                          # validation_split=0.1
-                          )
-            else:
-                model.evaluate(sequenced_data, batch_size=config.BATCH_SIZE)
-            if not hold_data_in_mem:
-                del sequenced_data
-            gc.collect()
-        if save_every_epoch:
-            model.save(config.model_name + "_epoch_" + str(epoch))
-        elif epoch % 5 == 0 and epoch != 0:
-            model.save(config.model_name + "_epoch_" + str(epoch))
-    model.save(config.model_name + "_fully_trained")
+        lossf = 0
+        # forward backward update, with optional gradient accumulation to simulate larger batch size
+        # and using the GradScaler if data type is float16
+        for micro_step in range(gradient_accumulation_steps):
+            with ctx:
 
+                logits, loss = model(X, labels=Y)
+                loss = loss / gradient_accumulation_steps   # scale the loss to account for gradient accumulation
+            # immediately async prefetch next batch while model is doing the forward pass on the GPU
+            X, Y = get_batch(dataloader_iter)
+            lossf += loss.item()
+            # backward pass, with gradient scaling if training in fp16
+            scaler.scale(loss).backward()
+        # clip the gradient
+        if grad_clip != 0.0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        # step the optimizer and scaler if training in fp16
+        scaler.step(optimizer)
+        scaler.update()
+        # flush the gradients as soon as we can, no need for this memory anymore
+        optimizer.zero_grad(set_to_none=True)
+        # timing and logging
+        t1 = time.time()
+        dt = t1 - t0
+        t0 = t1
+        if iter_num % log_interval == 0:
+            # get loss as float. note: this is a CPU-GPU sync point
+            # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
+            # lossf = loss.item() * gradient_accumulation_steps
+            metrics_dict["losses"].append(lossf)
+            print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, lr {lr:.6f}")
+        iter_num += 1
+        local_iter_num += 1
 
-def cnn_only_training(model, test_data_size, shuffle=True, use_class_weights=True, saved_file_order=False):
-    filenames = utils.get_sorted_filenames(current_data_dirs)
-    class_weights_factor = 2.0
-    if config.random_file_order_train:
-        random.shuffle(filenames)
-    if saved_file_order:
-        filename_dict_list = utils.load_training_file_list("data/train_data_dict_list_cnn.txt")
-    else:
-        filename_dict_list = utils.divide_dataset_lstm_compatible(filenames, test_data_size,
-                                                                  allowed_ram=config.allowed_ram_mb)
-    for k in filename_dict_list:
-        print(k)
-    for epoch in range(config.epochs):
-        for filename_dict in filename_dict_list:
-            K.clear_session()
-            images, labels = utils.concat_data_from_dict(filename_dict
-                                                         # , turns_or_stuck=True
-                                                         )
-            # images, labels = utils.convert_labels_to_time_pressed(labels, images=images)
-            labels = utils.convert_nothing_to_w_and_remove_it(labels)
-            if not filename_dict["is_test"]:
-                dataset = data_augmentation.get_augmented_dataset(images, labels, shuffle=shuffle)
-                if use_class_weights:
-                    class_weights = utils.get_class_weights("doesnt matter", labels=labels,
-                                                            convert_time_pressed=False, factor=class_weights_factor)
-                    if epoch == 0:
-                        print("class weights for filenames:", class_weights)
-                    model.fit(dataset, epochs=epoch + 1, initial_epoch=epoch, class_weight=class_weights)
-                else:
-                    model.fit(dataset, epochs=epoch + 1, initial_epoch=epoch)
-                del dataset
-            else:
-                with tf.device("CPU:0"):
-                    images, labels = tf.convert_to_tensor(images), tf.convert_to_tensor(labels)
-                if use_class_weights:
-                    # mimic training loss function
-                    class_weights = utils.get_class_weights("doesnt matter", labels=labels,
-                                                            convert_time_pressed=False, factor=class_weights_factor)
-                    sample_weights = utils.generate_sample_weights_from_class_weight_dict(labels, class_weights)
-                    model.evaluate(images, labels, batch_size=config.CNN_ONLY_BATCH_SIZE, sample_weight=sample_weights)
-                else:
-                    model.evaluate(images, labels, batch_size=config.CNN_ONLY_BATCH_SIZE)
-                print("augmented eval:")
-                dataset = data_augmentation.get_augmented_dataset(images, labels, shuffle=False)
-                model.evaluate(dataset)  # sample weight not supported when using dataset ( cringe )
-                del dataset
-            del images, labels
-            gc.collect()
-        # if epoch % 5 == 0 and epoch != 0:
-        model.save(config.cnn_only_name + "_epoch_n_" + str(epoch))
-    model.save(config.cnn_only_name)
+        # termination conditions
+        if iter_num > max_iters:
+            break
 
 
 def gen_data_from_dict_list(dict_list, incorporate_fps, shuffle=True):
@@ -208,5 +342,4 @@ def test_generate_time_series():
 
 
 if __name__ == "__main__":
-    # train_model(load_saved=False)
-    train_cnn_only(load_saved=True, swap_output_layer=False, freeze_part=True)
+    train_loop()

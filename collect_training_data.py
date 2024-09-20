@@ -178,9 +178,9 @@ def display_data(data):
     print(Counter(df[1].apply(str)))
 
 
-def show_training_data():
+def show_training_data_sequenced():
     # see what happens if you change height and width, don't mess up on reshaping for the neural net
-    images, labels = utils.load_file(current_data_dir + "240x180_rgb_2.h5")
+    images, labels = utils.load_file(current_data_dir + "240x180_rgb_3.h5")
     classes = labels.shape[-1]
     print(images.shape, labels.shape)
     timeseries = generate_timeseries(images, labels, shuffle=True, incorporate_fps=True)
@@ -243,5 +243,5 @@ if __name__ == "__main__":
     # normalize()
     # main(False, no_pause_remove=True)
     # test_collection_correct()
-    show_training_data()
+    show_training_data_sequenced()
 
