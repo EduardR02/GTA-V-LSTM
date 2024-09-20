@@ -5,12 +5,12 @@ import torch
 import os
 from contextlib import nullcontext
 from dataloader import get_dataloader
-from model import Dinov2ForClassification
+from model import Dinov2ForClassification, Dinov2ForTimeSeriesClassification
 import matplotlib.pyplot as plt
 import math
 import time
 
-current_data_dirs = [config.turns_data_dir_name, config.stuck_data_dir_name, config.new_data_dir_name]  # has to be list
+current_data_dirs = [config.turns_data_dir_name, config.new_data_dir_name]  # has to be list
 
 
 print(torch.backends.cudnn.version())
@@ -19,21 +19,23 @@ print(torch.version.cuda)
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 out_dir = os.path.join('models', 'test')
-eval_interval = 50
+eval_interval = 200
 log_interval = 1
 eval_iters = 8
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 fine_tune = False   # train the entire model or just the top
 init_from = 'scratch' # 'scratch' or 'resume'
-classifier_type = "seg_binary_bce" # "seg_cce" or "seg_bce" or "seg_binary_bce" or "bce"
 dino_size = "base"
 checkpoint_name = "ckpt.pt"
 metrics_name = "metrics_plot.png"
 gradient_accumulation_steps = 1 # used to simulate larger batch sizes
-batch_size = 38 # if gradient_accumulation_steps > 1, this is the micro-batch size
+batch_size = 64    # if gradient_accumulation_steps > 1, this is the micro-batch size
 train_split = 0.95   # test val split, important to keep it to reproduce obv
 convert_to_greyscale = False
+sequence_len = 1
+sequence_stride = 20
+classifier_type = "cce" # "cce" or "bce"
 
 # adamw optimizer
 learning_rate = 3e-4 # max learning rate
@@ -46,7 +48,7 @@ grad_clip = 0.0 # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
 warmup_iters = 400 # how many steps to warm up for
-lr_decay_iters = 10000 # should be ~= max_iters per Chinchilla
+lr_decay_iters = 20000 # should be ~= max_iters per Chinchilla
 min_lr = 5e-6 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
@@ -57,7 +59,7 @@ dtype = 'float16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported(
 compile = False # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
-config = {k: globals()[k] for k in config_keys} # will be useful for logging
+config_dict = {k: globals()[k] for k in config_keys} # will be useful for logging
 
 
 os.makedirs(out_dir, exist_ok=True)
@@ -69,33 +71,38 @@ device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.aut
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
+if classifier_type == "bce":
+    id2label = {0: "w", 1: "a", 2: "s", 3: "d"}
+else:
+    id2label = config.outputs
 
-id2label = {0: "w", 1: "a", 2: "s", 3: "d"}
 
-
-train_dataloader = get_dataloader(current_data_dirs, batch_size, train_split, True, shuffle=True)
-val_dataloader = get_dataloader(current_data_dirs, batch_size, train_split, False, shuffle=True)
+train_dataloader = get_dataloader(current_data_dirs, batch_size, train_split, True, classifier_type, sequence_len, sequence_stride, shuffle=True)
+val_dataloader = get_dataloader(current_data_dirs, batch_size, train_split, False, classifier_type, sequence_len, sequence_stride, shuffle=True)
 
 
 iter_num = 0
 best_val_loss = 1e9
 iter_num_on_load = 0
-non_segment = classifier_type == "bce"
 model = optimizer = scaler = None
 
 
 def load_model():
     global model, optimizer, scaler, iter_num, best_val_loss, iter_num_on_load
+    if sequence_len > 1:
+        dino_model = Dinov2ForTimeSeriesClassification
+    else:
+        dino_model = Dinov2ForClassification
     if init_from == 'scratch':
         print("Initializing a new model from scratch")
-        model = Dinov2ForClassification.from_pretrained(
-            f"facebook/dinov2-{dino_size}", id2label=id2label, num_labels=len(id2label))
+        model = dino_model.from_pretrained(
+            f"facebook/dinov2-{dino_size}", id2label=id2label, num_labels=len(id2label), classifier_type=classifier_type)
     elif init_from == 'resume':
         print(f"Resuming training from {out_dir}")
         ckpt_path = os.path.join(out_dir, checkpoint_name)
         checkpoint = torch.load(ckpt_path, map_location=device)
-        model = Dinov2ForClassification.from_pretrained(
-            f"facebook/dinov2-{dino_size}", id2label=id2label, num_labels=len(id2label))
+        model = dino_model.from_pretrained(
+            f"facebook/dinov2-{dino_size}", id2label=id2label, num_labels=len(id2label), classifier_type=classifier_type)
         state_dict = checkpoint['model']
         # fix the keys of the state dictionary :(
         # honestly no idea how checkpoints sometimes get this prefix, have to debug more
@@ -108,6 +115,9 @@ def load_model():
         iter_num_on_load = iter_num
         best_val_loss = checkpoint['best_val_loss']
         del state_dict  # very important to clear this checkpoint reference
+
+    for module in model.modules():
+        module.train()
 
     # freeze or unfreeze model
     for name, param in model.named_parameters():
@@ -168,6 +178,28 @@ def moving_average(data, window_size):
     return (cumsum_vec[window_size:] - cumsum_vec[:-window_size]) / window_size
 
 
+def calc_accuracy(logits, labels):
+    # Convert logits and labels to numpy arrays
+    preds = logits.detach().cpu()
+    if classifier_type == "bce":
+        preds = torch.nn.functional.sigmoid(preds)
+        preds = (preds.numpy() >= 0.5)
+        labels = labels.detach().cpu().numpy().astype(bool)
+        if sequence_len > 1:
+            labels = labels[:, -1, :]   # get the last label in the sequence
+        return np.mean(np.all(preds == labels, axis=-1))
+    else:
+        preds = torch.argmax(preds, dim=-1).numpy()
+        labels = labels.detach().cpu().numpy()
+        if sequence_len > 1:
+            labels = labels[:, -1, :]
+        labels = np.argmax(labels, axis=-1)
+        return np.mean(preds == labels)
+
+
+
+
+
 def plot_metrics(metrics, window_size=50):
     fig, ax1 = plt.subplots(figsize=(10, 6))
 
@@ -182,6 +214,14 @@ def plot_metrics(metrics, window_size=50):
     ax1.set_ylabel('Loss')
     ax1.legend(loc='upper left')
     ax1.set_title('Training Metrics')
+
+    ax2 = ax1.twinx()
+    ax2.plot(range(len(metrics["accuracy"])), metrics["accuracy"], label='Training Accuracy', color='green',
+             alpha=0.3)
+    smoothed_accuracies = moving_average(metrics["accuracy"], window_size)
+    ax2.plot(range(half_window - 1, len(metrics["accuracy"]) - half_window), smoothed_accuracies,
+             label='Smoothed Training Accuracy', color='green')
+
     plt.tight_layout()
     plt.savefig(os.path.join(out_dir, metrics_name))
     plt.close(fig)
@@ -216,7 +256,7 @@ def train_loop():
     global iter_num, best_val_loss
     t0 = time.time()
     local_iter_num = 0 # number of iterations in the lifetime of this process
-    metrics_dict = {"losses": [], "val_losses": [], "val_loss_iters": []}
+    metrics_dict = {"losses": [], "val_losses": [], "val_loss_iters": [], "accuracy": []}
     model = load_model()
     dataloader_iter = iter(train_dataloader)
     X, Y = get_batch(dataloader_iter)
@@ -240,7 +280,7 @@ def train_loop():
                         'optimizer': optimizer.state_dict(),
                         'iter_num': iter_num,
                         'best_val_loss': best_val_loss,
-                        'config': config,
+                        'config': config_dict,
                     }
                     print(f"saving checkpoint to {out_dir}")
                     torch.save(checkpoint, os.path.join(out_dir, checkpoint_name))
@@ -251,18 +291,20 @@ def train_loop():
             break
 
         lossf = 0
+        accuracy = 0
         # forward backward update, with optional gradient accumulation to simulate larger batch size
         # and using the GradScaler if data type is float16
         for micro_step in range(gradient_accumulation_steps):
             with ctx:
-
                 logits, loss = model(X, labels=Y)
                 loss = loss / gradient_accumulation_steps   # scale the loss to account for gradient accumulation
             # immediately async prefetch next batch while model is doing the forward pass on the GPU
             X, Y = get_batch(dataloader_iter)
             lossf += loss.item()
+            accuracy += calc_accuracy(logits, Y)
             # backward pass, with gradient scaling if training in fp16
             scaler.scale(loss).backward()
+        accuracy = accuracy / gradient_accumulation_steps
         # clip the gradient
         if grad_clip != 0.0:
             scaler.unscale_(optimizer)
@@ -276,12 +318,14 @@ def train_loop():
         t1 = time.time()
         dt = t1 - t0
         t0 = t1
+        metrics_dict["losses"].append(lossf)
+        metrics_dict["accuracy"].append(accuracy)
         if iter_num % log_interval == 0:
             # get loss as float. note: this is a CPU-GPU sync point
             # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
             # lossf = loss.item() * gradient_accumulation_steps
-            metrics_dict["losses"].append(lossf)
-            print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, lr {lr:.6f}")
+
+            print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, accuracy {accuracy*100:.3f}%, lr {lr:.6f}")
         iter_num += 1
         local_iter_num += 1
 
