@@ -2,6 +2,7 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
+from torch import stack, uint8
 import h5py
 import os
 import bisect
@@ -58,7 +59,6 @@ class H5Dataset(Dataset):
                 label = self._to_wasd(label)
             else:
                 label = label.flatten().astype(np.float32)
-
         if self.transform:
             augmented = self.transform(image=data)
             data = augmented['image']
@@ -119,8 +119,7 @@ class TimeSeriesDataset(H5Dataset):
             label = label.astype(np.float32)
 
         if self.transform:
-            data = np.array([self.transform(image=img)['image'] for img in data], dtype=np.float32)
-
+            data = stack([self.transform(image=data[i])['image'] for i in range(data.shape[0])], dim=0)
         return data, label
 
 
@@ -128,7 +127,7 @@ train_transform = A.Compose([
     # A.LongestMaxSize(max_size=max(height, width)),  # Resize the longest side to match the input size
     A.PadIfNeeded(min_height=height, min_width=width, border_mode=cv2.BORDER_CONSTANT, value=0),  # Pad the smaller side
     A.RandomBrightnessContrast(p=0.5),
-    A.Normalize(mean=ADE_MEAN, std=ADE_STD),
+    # A.Normalize(mean=ADE_MEAN, std=ADE_STD),
     ToTensorV2(),
 ])
 
@@ -136,7 +135,7 @@ train_transform = A.Compose([
 val_transform = A.Compose([
     # A.LongestMaxSize(max_size=max(height, width)),  # Resize the longest side to match the input size
     A.PadIfNeeded(min_height=height, min_width=width, border_mode=cv2.BORDER_CONSTANT, value=0),  # Pad the smaller side
-    A.Normalize(mean=ADE_MEAN, std=ADE_STD),
+    # A.Normalize(mean=ADE_MEAN, std=ADE_STD),
     ToTensorV2(),
 ])
 
@@ -163,13 +162,22 @@ def invNormalize(x):
 
 if __name__ == '__main__':
     data_dirs = ['data/turns', 'data/new_data']
-    train_loader = get_dataloader(data_dirs, 32, 0.95, True, 2, 40)
+    sequence_len = 2
+    train_loader = get_dataloader(data_dirs, 32, 0.95, True, "cce", sequence_len, 40)
     # vizualize data with matplotlib until stopped
     for data, label in train_loader:
         for i in range(data.shape[0]):
-            for j in range(data.shape[1]):
-                img = invNormalize(data[i][j].permute(1, 2, 0).numpy())
-                print(label[i][j])
+            if sequence_len > 1:
+                for j in range(data.shape[1]):
+                    print(data[i][j].max(), data[i][j].min())
+                    img = data[i][j].permute(1, 2, 0).numpy()
+                    print(label[i][j])
+                    plt.imshow(img)
+                    plt.show()
+            else:
+                print(data[i].max(), data[i].min())
+                img = data[i].permute(1, 2, 0).numpy()
+                print(label[i])
                 plt.imshow(img)
                 plt.show()
 
