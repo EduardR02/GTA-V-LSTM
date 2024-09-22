@@ -127,7 +127,7 @@ train_transform = A.Compose([
     # A.LongestMaxSize(max_size=max(height, width)),  # Resize the longest side to match the input size
     A.PadIfNeeded(min_height=height, min_width=width, border_mode=cv2.BORDER_CONSTANT, value=0),  # Pad the smaller side
     A.RandomBrightnessContrast(p=0.5),
-    # A.Normalize(mean=ADE_MEAN, std=ADE_STD),
+    A.Normalize(mean=ADE_MEAN, std=ADE_STD, max_pixel_value=255.0),
     ToTensorV2(),
 ])
 
@@ -135,7 +135,7 @@ train_transform = A.Compose([
 val_transform = A.Compose([
     # A.LongestMaxSize(max_size=max(height, width)),  # Resize the longest side to match the input size
     A.PadIfNeeded(min_height=height, min_width=width, border_mode=cv2.BORDER_CONSTANT, value=0),  # Pad the smaller side
-    # A.Normalize(mean=ADE_MEAN, std=ADE_STD),
+    A.Normalize(mean=ADE_MEAN, std=ADE_STD, max_pixel_value=255.0),
     ToTensorV2(),
 ])
 
@@ -162,7 +162,7 @@ def invNormalize(x):
 
 if __name__ == '__main__':
     data_dirs = ['data/turns', 'data/new_data']
-    sequence_len = 2
+    sequence_len = 1
     train_loader = get_dataloader(data_dirs, 32, 0.95, True, "cce", sequence_len, 40)
     # vizualize data with matplotlib until stopped
     for data, label in train_loader:

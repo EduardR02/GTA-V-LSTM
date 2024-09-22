@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import math
 import time
 
-current_data_dirs = [config.turns_data_dir_name, config.new_data_dir_name]  # has to be list
+current_data_dirs = [config.new_data_dir_name]  # has to be list
 
 
 print(torch.backends.cudnn.version())
@@ -19,7 +19,7 @@ print(torch.version.cuda)
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 out_dir = os.path.join('models', 'test')
-eval_interval = 200
+eval_interval = 400
 log_interval = 1
 eval_iters = 8
 eval_only = False # if True, script exits right after the first eval
@@ -30,25 +30,25 @@ dino_size = "base"
 checkpoint_name = "ckpt.pt"
 metrics_name = "metrics_plot.png"
 gradient_accumulation_steps = 1 # used to simulate larger batch sizes
-batch_size = 64    # if gradient_accumulation_steps > 1, this is the micro-batch size
+batch_size = 32    # if gradient_accumulation_steps > 1, this is the micro-batch size
 train_split = 0.95   # test val split, important to keep it to reproduce obv
 convert_to_greyscale = False
 sequence_len = 1
 sequence_stride = 20
-classifier_type = "cce" # "cce" or "bce"
+classifier_type = "bce" # "cce" or "bce"
 
 # adamw optimizer
-learning_rate = 3e-4 # max learning rate
+learning_rate = 2e-5 # max learning rate
 max_iters = 60000 # total number of training iterations
 # optimizer settings
-weight_decay = 1e-1
+weight_decay = 1e-2
 beta1 = 0.9
 beta2 = 0.995
-grad_clip = 0.0 # clip gradients at this value, or disable if == 0.0
+grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
-warmup_iters = 400 # how many steps to warm up for
-lr_decay_iters = 20000 # should be ~= max_iters per Chinchilla
+warmup_iters = 100 # how many steps to warm up for
+lr_decay_iters = 10000 # should be ~= max_iters per Chinchilla
 min_lr = 5e-6 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
@@ -163,7 +163,7 @@ def estimate_loss(model):
         dataloader_iter = iter(train_dataloader if split == 'train' else val_dataloader)
         losses = torch.zeros(eval_iters * gradient_accumulation_steps)
         for k in range(eval_iters * gradient_accumulation_steps):
-            X, Y = get_batch(dataloader_iter)
+            X, Y, Y_CPU, dataloader_iter = get_batch(dataloader_iter, split)
             with ctx:
                 logits, loss = model(X, labels=Y)
             losses[k] = loss.item()
@@ -242,14 +242,20 @@ def get_lr(it):
     return min_lr + coeff * (learning_rate - min_lr)
 
 
-def get_batch(dataloader_iter):
-    x, y = next(dataloader_iter)
+def get_batch(dataloader_iter, split):
+    try:
+        x, y = next(dataloader_iter)
+    except StopIteration:
+        dataloader_iter = iter(train_dataloader if split == 'train' else val_dataloader)
+        x, y = next(dataloader_iter)
+    y_cpu = y
+    y_cpu = y_cpu.detach().cpu()
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
     else:
         x, y = x.to(device), y.to(device)
-    return x, y
+    return x, y, y_cpu, dataloader_iter
 
 
 def train_loop():
@@ -259,7 +265,7 @@ def train_loop():
     metrics_dict = {"losses": [], "val_losses": [], "val_loss_iters": [], "accuracy": []}
     model = load_model()
     dataloader_iter = iter(train_dataloader)
-    X, Y = get_batch(dataloader_iter)
+    X, Y, Y_CPU, dataloader_iter = get_batch(dataloader_iter, 'train')
     while True:
         # determine and set the learning rate for this iteration
         lr = get_lr(iter_num) if decay_lr else learning_rate
@@ -299,9 +305,10 @@ def train_loop():
                 logits, loss = model(X, labels=Y)
                 loss = loss / gradient_accumulation_steps   # scale the loss to account for gradient accumulation
             # immediately async prefetch next batch while model is doing the forward pass on the GPU
-            X, Y = get_batch(dataloader_iter)
+            X, Y, Y_CPU_NEW, dataloader_iter = get_batch(dataloader_iter, 'train')
             lossf += loss.item()
-            accuracy += calc_accuracy(logits, Y)
+            accuracy += calc_accuracy(logits, Y_CPU)
+            Y_CPU = Y_CPU_NEW
             # backward pass, with gradient scaling if training in fp16
             scaler.scale(loss).backward()
         accuracy = accuracy / gradient_accumulation_steps
