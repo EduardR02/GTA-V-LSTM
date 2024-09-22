@@ -150,7 +150,8 @@ def get_dataloader(data_dir, batch_size, train_split, is_train, classifier_type,
         batch_size=batch_size,
         shuffle=shuffle,
         pin_memory=True,
-        pin_memory_device="cuda"
+        pin_memory_device="cuda",
+        drop_last=True
     )
     return dataloader
 

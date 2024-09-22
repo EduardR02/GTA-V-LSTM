@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import math
 import time
 
-current_data_dirs = [config.new_data_dir_name]  # has to be list
+current_data_dirs = [config.turns_data_dir_name, config.new_data_dir_name]  # has to be list
 
 
 print(torch.backends.cudnn.version())
@@ -19,7 +19,7 @@ print(torch.version.cuda)
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 out_dir = os.path.join('models', 'test')
-eval_interval = 400
+eval_interval = 300
 log_interval = 1
 eval_iters = 8
 eval_only = False # if True, script exits right after the first eval
@@ -30,7 +30,7 @@ dino_size = "base"
 checkpoint_name = "ckpt.pt"
 metrics_name = "metrics_plot.png"
 gradient_accumulation_steps = 1 # used to simulate larger batch sizes
-batch_size = 32    # if gradient_accumulation_steps > 1, this is the micro-batch size
+batch_size = 256    # if gradient_accumulation_steps > 1, this is the micro-batch size
 train_split = 0.95   # test val split, important to keep it to reproduce obv
 convert_to_greyscale = False
 sequence_len = 1
@@ -38,7 +38,7 @@ sequence_stride = 20
 classifier_type = "bce" # "cce" or "bce"
 
 # adamw optimizer
-learning_rate = 2e-5 # max learning rate
+learning_rate = 1e-4 # max learning rate
 max_iters = 60000 # total number of training iterations
 # optimizer settings
 weight_decay = 1e-2
@@ -47,7 +47,7 @@ beta2 = 0.995
 grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
-warmup_iters = 100 # how many steps to warm up for
+warmup_iters = 400 # how many steps to warm up for
 lr_decay_iters = 10000 # should be ~= max_iters per Chinchilla
 min_lr = 5e-6 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 # DDP settings
@@ -162,12 +162,15 @@ def estimate_loss(model):
     for split in ['train', 'val']:
         dataloader_iter = iter(train_dataloader if split == 'train' else val_dataloader)
         losses = torch.zeros(eval_iters * gradient_accumulation_steps)
+        accuracies = torch.zeros(eval_iters * gradient_accumulation_steps)
         for k in range(eval_iters * gradient_accumulation_steps):
             X, Y, Y_CPU, dataloader_iter = get_batch(dataloader_iter, split)
             with ctx:
                 logits, loss = model(X, labels=Y)
             losses[k] = loss.item()
+            accuracies[k] = calc_accuracy(logits, Y_CPU)
         out[split] = losses.mean()
+        out[split + "_accuracy"] = accuracies.mean()
     model.train()
     return out
 
@@ -197,30 +200,42 @@ def calc_accuracy(logits, labels):
         return np.mean(preds == labels)
 
 
-
-
-
 def plot_metrics(metrics, window_size=50):
-    fig, ax1 = plt.subplots(figsize=(10, 6))
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
 
-    # Plot training loss and validation loss
-    ax1.plot(range(len(metrics["losses"])), metrics["losses"], label='Training Loss', color='blue', alpha=0.3)
+    # Plot losses
+    ax1.plot(range(len(metrics["losses"])), metrics["losses"], label='Training Loss', color='#1f77b4',
+             alpha=0.3)  # light blue
     smoothed_losses = moving_average(metrics["losses"], window_size)
     half_window = window_size // 2
-    ax1.plot(range(half_window-1, len(metrics["losses"]) - half_window), smoothed_losses, label='Smoothed Training Loss', color='blue')
-
-    ax1.plot(metrics["val_loss_iters"], metrics["val_losses"], label='Validation Loss', color='red', linestyle='dashed', marker='o')
-    ax1.set_xlabel('Iteration')
+    ax1.plot(range(half_window - 1, len(metrics["losses"]) - half_window), smoothed_losses,
+             label='Smoothed Training Loss', color='#1f77b4')
+    ax1.plot(metrics["val_loss_iters"], metrics["val_losses"], label='Validation Loss', color='#ff7f0e',
+             linestyle='dashed', marker='o')  # light orange
     ax1.set_ylabel('Loss')
+    ax1.yaxis.set_label_position("right")
+    ax1.yaxis.tick_right()
     ax1.legend(loc='upper left')
-    ax1.set_title('Training Metrics')
+    ax1.set_title('Training and Validation Losses')
 
-    ax2 = ax1.twinx()
-    ax2.plot(range(len(metrics["accuracy"])), metrics["accuracy"], label='Training Accuracy', color='green',
-             alpha=0.3)
+    # Plot accuracies
+    ax2.plot(range(len(metrics["accuracy"])), metrics["accuracy"], label='Training Accuracy (Train Augmentation)',
+             color='#2ca02c', alpha=0.3)  # green
     smoothed_accuracies = moving_average(metrics["accuracy"], window_size)
     ax2.plot(range(half_window - 1, len(metrics["accuracy"]) - half_window), smoothed_accuracies,
-             label='Smoothed Training Accuracy', color='green')
+             label='Smoothed Training Accuracy (Train Augmentation)', color='#2ca02c')
+
+    ax2.plot(metrics["val_loss_iters"], metrics["train_accs"], label='Training Accuracy (Val Augmentation)',
+             color='#9467bd', linestyle='dashed', marker='s')  # purple
+    ax2.plot(metrics["val_loss_iters"], metrics["val_accs"], label='Validation Accuracy', color='#d62728',
+             linestyle='dashed', marker='o')  # red
+
+    ax2.set_xlabel('Iteration')
+    ax2.set_ylabel('Accuracy')
+    ax2.yaxis.set_label_position("right")
+    ax2.yaxis.tick_right()
+    ax2.legend(loc='lower left')
+    ax2.set_title('Training and Validation Accuracies')
 
     plt.tight_layout()
     plt.savefig(os.path.join(out_dir, metrics_name))
@@ -249,7 +264,7 @@ def get_batch(dataloader_iter, split):
         dataloader_iter = iter(train_dataloader if split == 'train' else val_dataloader)
         x, y = next(dataloader_iter)
     y_cpu = y
-    y_cpu = y_cpu.detach().cpu()
+    y_cpu = y_cpu.detach().cpu()    # not necessary, but to make sure
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
@@ -262,7 +277,7 @@ def train_loop():
     global iter_num, best_val_loss
     t0 = time.time()
     local_iter_num = 0 # number of iterations in the lifetime of this process
-    metrics_dict = {"losses": [], "val_losses": [], "val_loss_iters": [], "accuracy": []}
+    metrics_dict = {"losses": [], "val_losses": [], "val_loss_iters": [], "accuracy": [], "val_accs": [], "train_accs": []}
     model = load_model()
     dataloader_iter = iter(train_dataloader)
     X, Y, Y_CPU, dataloader_iter = get_batch(dataloader_iter, 'train')
@@ -274,12 +289,14 @@ def train_loop():
 
         # evaluate the loss on train/val sets and write checkpoints
         if iter_num % eval_interval == 0 and iter_num != iter_num_on_load and iter_num != 0:
-            losses = estimate_loss(model)
-            metrics_dict["val_losses"].append(losses["val"])
+            losses_and_accs = estimate_loss(model)
+            metrics_dict["val_losses"].append(losses_and_accs["val"])
             metrics_dict["val_loss_iters"].append(local_iter_num)
-            print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-            if losses['val'] < best_val_loss or always_save_checkpoint:
-                best_val_loss = losses['val'] if losses['val'] < best_val_loss else best_val_loss
+            metrics_dict["val_accs"].append(losses_and_accs["val_accuracy"])
+            metrics_dict["train_accs"].append(losses_and_accs["train_accuracy"])
+            print(f"step {iter_num}: train loss {losses_and_accs['train']:.4f}, val loss {losses_and_accs['val']:.4f}, train acc {losses_and_accs['train_accuracy']*100:.3f}, val acc {losses_and_accs['val_accuracy']*100:.3f}")
+            if losses_and_accs['val'] < best_val_loss or always_save_checkpoint:
+                best_val_loss = losses_and_accs['val'] if losses_and_accs['val'] < best_val_loss else best_val_loss
                 if iter_num > 0:
                     checkpoint = {
                         'model': model.state_dict(),
@@ -290,7 +307,7 @@ def train_loop():
                     }
                     print(f"saving checkpoint to {out_dir}")
                     torch.save(checkpoint, os.path.join(out_dir, checkpoint_name))
-                    if best_val_loss == losses['val']:
+                    if best_val_loss == losses_and_accs['val']:
                         torch.save(checkpoint, os.path.join(out_dir, checkpoint_name.split(".")[0] + "-best." + checkpoint_name.split(".")[1]))
             plot_metrics(metrics_dict)
         if iter_num == 0 and eval_only:
