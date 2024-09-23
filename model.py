@@ -10,17 +10,21 @@ class TransferNetwork(torch.nn.Module):
         self.width = tokenW
         self.height = tokenH
         self.classifier_h1 = torch.nn.Conv2d(in_channels, 32, (5, 5), padding=2)
+        self.layer_norm_1 = torch.nn.LayerNorm([32, self.height, self.width])
         self.classifier_h2 = torch.nn.Conv2d(32, 16, (5, 5), padding=2)
         self.classifier_h3 = torch.nn.Conv2d(16, 8, (3, 3), padding=1)
+        self.layer_norm_2 = torch.nn.LayerNorm(8 * self.height * self.width)
         self.classifier_out = torch.nn.Linear(8 * self.height * self.width, num_classes)
 
     def forward(self, embeddings):
         embeddings = embeddings.reshape(-1, self.height, self.width, self.in_channels)
         embeddings = embeddings.permute(0, 3, 1, 2)
         embeddings = torch.nn.functional.relu(self.classifier_h1(embeddings))
+        embeddings = self.layer_norm_1(embeddings)
         embeddings = torch.nn.functional.relu(self.classifier_h2(embeddings))
         embeddings = torch.nn.functional.relu(self.classifier_h3(embeddings))
         embeddings = embeddings.reshape(-1, 8 * self.height * self.width)
+        embeddings = self.layer_norm_2(embeddings)
         return self.apply_last_layer(embeddings)
 
     def apply_last_layer(self, embeddings):
@@ -31,7 +35,7 @@ class Dinov2ForClassification(Dinov2PreTrainedModel):
     def __init__(self, config, classifier_type):
         super().__init__(config)
         self.dinov2 = Dinov2Model(config)
-        self.classifier = TransferNetwork(config.hidden_size, 13, 18, config.num_labels)
+        self.classifier = TransferNetwork(config.hidden_size, 18, 13, config.num_labels)
         self.classifier_type = classifier_type
         if self.classifier_type == "bce":
             self.loss_fct = torch.nn.BCEWithLogitsLoss()
@@ -86,21 +90,20 @@ class Dinov2ForClassification(Dinov2PreTrainedModel):
 class TransferNetworkLSTM(TransferNetwork):
     def __init__(self, in_channels, tokenW=32, tokenH=32):
         super().__init__(in_channels, tokenW, tokenH)
-        self.layer_norm = torch.nn.LayerNorm(8 * self.width * self.height)
         self.feature_size = 8 * self.width * self.height
         del self.classifier_out     # so we can use all the weights from the non-lstm checkpoint easily
 
     def apply_last_layer(self, embeddings):
-        return self.layer_norm(embeddings)
+        return embeddings
 
 
 class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
     def __init__(self, config, classifier_type):
         super().__init__(config, classifier_type)
-        self.classifier = TransferNetworkLSTM(config.hidden_size, 13, 18)
+        self.classifier = TransferNetworkLSTM(config.hidden_size, 18, 13)
 
         # LSTM layer
-        self.lstm_hidden_size = 256
+        self.lstm_hidden_size = 128
         self.lstm = torch.nn.LSTM(
             input_size=self.classifier.feature_size,  # Features + previous labels
             hidden_size=self.lstm_hidden_size,
@@ -108,7 +111,7 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
             batch_first=True,
             bias=False
         )
-
+        self.layer_norm_3 = torch.nn.LayerNorm(self.lstm_hidden_size)
         # Final classification layer
         self.final_linear_layer = torch.nn.Linear(self.lstm_hidden_size, config.num_labels)
 
@@ -144,7 +147,7 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
         lstm_last_output = lstm_out[:, -1, :]
 
         # Final classification
-        logits = self.final_linear_layer(lstm_last_output)
+        logits = self.final_linear_layer(self.layer_norm_3(lstm_last_output))
 
         loss = None
         if labels is not None:

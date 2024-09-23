@@ -132,8 +132,8 @@ def simple_output_key(prediction):
     press_keys = True
     output_dict = {"w": 0, "a": 1, "s": 2, "d": 3}
     prediction = prediction.cpu().detach().numpy()
-    thresholds = np.array([0.5, 0.5, 0.5, 0.5])     # w a s d
-    result = (prediction > thresholds).astype(int).squeeze()
+    thresholds = np.array([0.35, 0.5, 0.5, 0.5])     # w a s d
+    result = (prediction >= thresholds).astype(int).squeeze()
     if press_keys:
         if result[0] == 1:
             PressKey(W)

@@ -1,6 +1,5 @@
 import numpy as np
 import config
-import utils
 import torch
 import os
 from contextlib import nullcontext
@@ -26,7 +25,7 @@ eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 fine_tune = False   # train the entire model or just the top
 freeze_non_dino_cnn = False
-init_from = 'resume' # 'scratch' or 'resume'
+init_from = 'scratch' # 'scratch' or 'resume'
 dino_size = "base"
 checkpoint_name = "ckpt.pt"
 metrics_name = "metrics_plot.png"
