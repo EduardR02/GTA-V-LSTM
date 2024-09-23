@@ -12,7 +12,7 @@ class TransferNetwork(torch.nn.Module):
         self.classifier_h1 = torch.nn.Conv2d(in_channels, 32, (5, 5), padding=2)
         self.classifier_h2 = torch.nn.Conv2d(32, 16, (5, 5), padding=2)
         self.classifier_h3 = torch.nn.Conv2d(16, 8, (3, 3), padding=1)
-        self.classifier_out = torch.nn.Linear(8 * self.width * self.height, num_classes)
+        self.classifier_out = torch.nn.Linear(8 * self.height * self.width, num_classes)
 
     def forward(self, embeddings):
         embeddings = embeddings.reshape(-1, self.height, self.width, self.in_channels)
@@ -20,7 +20,10 @@ class TransferNetwork(torch.nn.Module):
         embeddings = torch.nn.functional.relu(self.classifier_h1(embeddings))
         embeddings = torch.nn.functional.relu(self.classifier_h2(embeddings))
         embeddings = torch.nn.functional.relu(self.classifier_h3(embeddings))
-        embeddings = embeddings.reshape(-1, 8 * self.width * self.height)
+        embeddings = embeddings.reshape(-1, 8 * self.height * self.width)
+        return self.apply_last_layer(embeddings)
+
+    def apply_last_layer(self, embeddings):
         return self.classifier_out(embeddings)
 
 
@@ -80,36 +83,26 @@ class Dinov2ForClassification(Dinov2PreTrainedModel):
         return optimizer
 
 
-class TransferNetworkLSTM(torch.nn.Module):
+class TransferNetworkLSTM(TransferNetwork):
     def __init__(self, in_channels, tokenW=32, tokenH=32):
-        super(TransferNetworkLSTM, self).__init__()
-        self.in_channels = in_channels
-        self.width = tokenW
-        self.height = tokenH
-        self.classifier_h1 = torch.nn.Conv2d(in_channels, 32, (5, 5), padding=2)
-        self.classifier_h2 = torch.nn.Conv2d(32, 8, (3, 3), padding=1)
+        super().__init__(in_channels, tokenW, tokenH)
         self.layer_norm = torch.nn.LayerNorm(8 * self.width * self.height)
         self.feature_size = 8 * self.width * self.height
+        del self.classifier_out     # so we can use all the weights from the non-lstm checkpoint easily
 
-    def forward(self, embeddings):
-        embeddings = embeddings.reshape(-1, self.height, self.width, self.in_channels)
-        embeddings = embeddings.permute(0, 3, 1, 2)
-        embeddings = torch.nn.functional.relu(self.classifier_h1(embeddings))
-        embeddings = torch.nn.functional.relu(self.classifier_h2(embeddings))
-        embeddings = embeddings.reshape(-1, 8 * self.width * self.height)
-        embeddings = self.layer_norm(embeddings)
-        return embeddings
+    def apply_last_layer(self, embeddings):
+        return self.layer_norm(embeddings)
 
 
 class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
     def __init__(self, config, classifier_type):
         super().__init__(config, classifier_type)
-        self.feature_extractor = TransferNetworkLSTM(config.hidden_size, 13, 18)
+        self.classifier = TransferNetworkLSTM(config.hidden_size, 13, 18)
 
         # LSTM layer
         self.lstm_hidden_size = 256
         self.lstm = torch.nn.LSTM(
-            input_size=self.feature_extractor.feature_size,  # Features + previous labels
+            input_size=self.classifier.feature_size,  # Features + previous labels
             hidden_size=self.lstm_hidden_size,
             num_layers=1,
             batch_first=True,
@@ -117,7 +110,7 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
         )
 
         # Final classification layer
-        self.classifier = torch.nn.Linear(self.lstm_hidden_size, config.num_labels)
+        self.final_linear_layer = torch.nn.Linear(self.lstm_hidden_size, config.num_labels)
 
     def forward(self, pixel_values, output_hidden_states=False, output_attentions=False, labels=None):
         batch_size, time_steps, channels, height, width = pixel_values.shape
@@ -131,7 +124,7 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
                 output_attentions=output_attentions
             )
             patch_embeddings = outputs.last_hidden_state[:, 1:, :]
-            features.append(self.feature_extractor(patch_embeddings))
+            features.append(self.classifier(patch_embeddings))
 
         # Stack features from all time steps
         features = torch.stack(features, dim=1)  # Shape: (batch_size, time_steps, feature_size)
@@ -151,7 +144,7 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
         lstm_last_output = lstm_out[:, -1, :]
 
         # Final classification
-        logits = self.classifier(lstm_last_output)
+        logits = self.final_linear_layer(lstm_last_output)
 
         loss = None
         if labels is not None:

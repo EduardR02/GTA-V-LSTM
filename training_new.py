@@ -18,22 +18,23 @@ print(torch.version.cuda)
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
-out_dir = os.path.join('models', 'test')
+out_dir = os.path.join('models', 'lstm')
 eval_interval = 300
 log_interval = 1
 eval_iters = 8
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 fine_tune = False   # train the entire model or just the top
-init_from = 'scratch' # 'scratch' or 'resume'
+freeze_non_dino_cnn = False
+init_from = 'resume' # 'scratch' or 'resume'
 dino_size = "base"
 checkpoint_name = "ckpt.pt"
 metrics_name = "metrics_plot.png"
 gradient_accumulation_steps = 1 # used to simulate larger batch sizes
-batch_size = 256    # if gradient_accumulation_steps > 1, this is the micro-batch size
+batch_size = 128    # if gradient_accumulation_steps > 1, this is the micro-batch size
 train_split = 0.95   # test val split, important to keep it to reproduce obv
 convert_to_greyscale = False
-sequence_len = 1
+sequence_len = 2
 sequence_stride = 20
 classifier_type = "bce" # "cce" or "bce"
 
@@ -48,7 +49,7 @@ grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
 warmup_iters = 400 # how many steps to warm up for
-lr_decay_iters = 10000 # should be ~= max_iters per Chinchilla
+lr_decay_iters = 15000 # should be ~= max_iters per Chinchilla
 min_lr = 5e-6 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
@@ -87,7 +88,7 @@ iter_num_on_load = 0
 model = optimizer = scaler = None
 
 
-def load_model():
+def load_model(sample_only=False):
     global model, optimizer, scaler, iter_num, best_val_loss, iter_num_on_load
     if sequence_len > 1:
         dino_model = Dinov2ForTimeSeriesClassification
@@ -110,11 +111,18 @@ def load_model():
         for k,v in list(state_dict.items()):
             if k.startswith(unwanted_prefix):
                 state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-        model.load_state_dict(state_dict)
+        model.load_state_dict(state_dict, strict=False)
         iter_num = checkpoint['iter_num']
         iter_num_on_load = iter_num
         best_val_loss = checkpoint['best_val_loss']
         del state_dict  # very important to clear this checkpoint reference
+
+    if sample_only:
+        model.eval()
+        model.to(device)
+        del checkpoint
+        torch.cuda.empty_cache()
+        return model
 
     for module in model.modules():
         module.train()
@@ -123,6 +131,9 @@ def load_model():
     for name, param in model.named_parameters():
         if name.startswith("dinov2"):
             param.requires_grad = fine_tune
+        if sequence_len > 1 and freeze_non_dino_cnn and "classifier" in name and "layer_norm" not in name:
+            param.requires_grad = False
+            print(f"Freezing {name}")
         # maybe also freeze layernorm no matter what here
 
     print(sum(p.numel() for p in model.parameters() if p.requires_grad))
@@ -356,57 +367,6 @@ def train_loop():
         # termination conditions
         if iter_num > max_iters:
             break
-
-
-def gen_data_from_dict_list(dict_list, incorporate_fps, shuffle=True):
-    res_list = []
-    for filename_dict in dict_list:
-        res_list += [get_sequenced_data(filename_dict, incorporate_fps, shuffle)]
-    return res_list
-
-
-def get_sequenced_data(filename_dict, incorporate_fps, shuffle=True):
-    # don't concat to np arr cuz first need to seq
-    images, labels = utils.concat_data_from_dict(filename_dict, concat=False)
-    combined_seq_data = None
-    for i in range(len(labels)):
-        images_curr, labels_curr = utils.convert_labels_to_time_pressed(labels[i], images=images[i])
-        curr_seq_data = generate_timeseries(images_curr, labels_curr, shuffle=shuffle, incorporate_fps=incorporate_fps)
-        if not combined_seq_data:
-            combined_seq_data = curr_seq_data
-        else:
-            combined_seq_data = combined_seq_data.concatenate(curr_seq_data)
-    return combined_seq_data
-
-
-def generate_timeseries(images, labels, shuffle=False, incorporate_fps=True):
-    sampling_rate = utils.get_fps_ratio() if incorporate_fps else 1
-    # labels have to correspond to predicted sequence, not samplerate-1 because we want the next timestep as label
-    labels = labels[sampling_rate * config.sequence_len:]
-    sequenced_data = timeseries_dataset_from_array(images, labels, sequence_length=config.sequence_len,
-                                                   sampling_rate=sampling_rate,
-                                                   sequence_stride=config.sequence_stride,
-                                                   batch_size=config.BATCH_SIZE,
-                                                   shuffle=shuffle)
-    return sequenced_data
-
-
-def test_generate_time_series():
-    images, labels = utils.load_file(config.stuck_data_dir_name + config.data_name + "_0.h5")
-    print(len(labels))
-    data = generate_timeseries(images, labels, shuffle=False, incorporate_fps=True)
-    shift_val = utils.get_fps_ratio() * config.sequence_len
-    print(len(labels) - shift_val)
-    fps_ratio = utils.get_fps_ratio()
-    for i, batch in enumerate(data):
-        ninputs, nlabels = batch
-        print(len(nlabels), len(ninputs))
-        for j in range(len(nlabels)):
-            temp_l = labels[j + shift_val + i * config.BATCH_SIZE]
-            temp_i = images[i * config.BATCH_SIZE + j: i * config.BATCH_SIZE + shift_val + j: fps_ratio]
-            print(i * config.BATCH_SIZE + j)
-            assert np.array_equal(ninputs[j], temp_i)
-            assert np.array_equal(nlabels[j], temp_l)
 
 
 if __name__ == "__main__":

@@ -83,7 +83,7 @@ class H5Dataset(Dataset):
         new_label[..., 2] = label[..., 2]  # s
         new_label[..., 3] = label[..., 3] | label[..., 5]  # d
 
-        return new_label.squeeze(0)
+        return new_label.squeeze()
 
 
 class TimeSeriesDataset(H5Dataset):
@@ -168,16 +168,17 @@ if __name__ == '__main__':
     # vizualize data with matplotlib until stopped
     for data, label in train_loader:
         for i in range(data.shape[0]):
+            print(data.shape)
             if sequence_len > 1:
                 for j in range(data.shape[1]):
                     print(data[i][j].max(), data[i][j].min())
-                    img = data[i][j].permute(1, 2, 0).numpy()
+                    img = invNormalize(data[i][j].permute(1, 2, 0).numpy())
                     print(label[i][j])
                     plt.imshow(img)
                     plt.show()
             else:
                 print(data[i].max(), data[i].min())
-                img = data[i].permute(1, 2, 0).numpy()
+                img = invNormalize(data[i].permute(1, 2, 0).numpy())
                 print(label[i])
                 plt.imshow(img)
                 plt.show()

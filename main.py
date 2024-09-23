@@ -1,3 +1,5 @@
+from collections import deque
+
 import numpy as np
 import mss
 import cv2
@@ -5,12 +7,14 @@ import time
 import utils
 from keys import PressKey, ReleaseKey, W, A, S, D
 import config
-
 from grabkeys import key_check
 from threading import Thread as Worker
+from training_new import load_model
+from dataloader import val_transform
+import torch
 
 threshold_turn = 0
-t_time = 0.04
+t_time = 0.05
 
 
 def sleep_and_release(key):
@@ -124,6 +128,40 @@ def output_key(prediction):
     print("Prediction:", output, "Value", pred_value)
 
 
+def simple_output_key(prediction):
+    press_keys = True
+    output_dict = {"w": 0, "a": 1, "s": 2, "d": 3}
+    prediction = prediction.cpu().detach().numpy()
+    thresholds = np.array([0.5, 0.5, 0.5, 0.5])     # w a s d
+    result = (prediction > thresholds).astype(int).squeeze()
+    if press_keys:
+        if result[0] == 1:
+            PressKey(W)
+        else:
+            ReleaseKey(W)
+        if result[1] == 1:
+            PressKey(A)
+            t1 = Worker(target=sleep_and_release, args=(A,))
+            t1.start()
+        else:
+            ReleaseKey(A)
+        if result[2] == 1:
+            PressKey(S)
+        else:
+            ReleaseKey(S)
+        if result[3] == 1:
+            PressKey(D)
+            t2 = Worker(target=sleep_and_release, args=(D,))
+            t2.start()
+        else:
+            ReleaseKey(D)
+    if np.sum(result) == 0:
+        print("nothing pressed")
+    else:
+        # print which keys are pressed in one line
+        print("".join([key for key, value in output_dict.items() if result[value] == 1]))
+
+
 # noinspection PyTypeChecker
 def show_screen():
     sct = mss.mss()
@@ -143,17 +181,25 @@ def show_screen():
 
 def main_with_cnn():
     global t_time
-    setup_tf()
-    model = load_model(config.cnn_only_name)
-    model.summary()
+    model = load_model(sample_only=True)
     sct = mss.mss()
     max_t_time = 1.0 / utils.get_fps_ratio()
+    counter = 0
+    t = time.time()
     while True:
+        counter += 1
         img = get_screencap_img(sct)
-        img = img.reshape((-1, config.height, config.width, config.color_channels))
-        prediction = model.predict(img)[0]
-        output_key(prediction)
+        img = val_transform(image=img)["image"]
+        img = img[None, ...]
+        img = img.pin_memory().to("cuda")
+        prediction, _ = model(img)
+        prediction = torch.nn.functional.sigmoid(prediction)
+        simple_output_key(prediction)
         key = key_check()
+        if (time.time() - t) >= 1:
+            print("fps:", counter)
+            counter = 0
+            t = time.time()
         if "T" in key:
             release_all()
             break
@@ -170,48 +216,41 @@ def main_with_cnn():
 
 def main_with_lstm():
     global t_time
-    setup_tf()
-    t = time.time()
-    feature_extractor = load_model(config.cnn_only_name)
-    feature_extractor = inception_expose_feature_layer(feature_extractor)
-    lstm_model = load_model(config.model_name)
-    # lstm_model = lstm_only()
-    print("Models took:", time.time() - t, "to load.")
-    feature_extractor.summary()
-    lstm_model.summary()
+    model = load_model(sample_only=True)
     sct = mss.mss()
-    counter = 0
+    max_t_time = 1.0 / utils.get_fps_ratio()
     t = time.time()
-    max_t_time = round(1.0 / utils.get_fps_ratio(), 2)  # round to 2 digits
-    images = []
-    while 1:
-        counter += 1
-        img = get_screencap_img(sct)
+    counter = 0
+    # Use a deque to store timestamped images
+    max_stored_images = 20  # Adjust this value based on your memory constraints
+    image_buffer = deque(maxlen=max_stored_images)
 
-        if len(images) < config.sequence_len:
-            images.append(img)
-        else:
-            images.pop(0)  # remove oldest image
-            images.append(img)  # always have last seq_len images, put newest image at the end
-            # create numpy array from list and reshape to correct dimensions, height, then width!!!!!!!!
-            input_arr = np.stack(images, axis=0)
-            features = feature_extractor.predict(input_arr)
-            # add single dimension at front for prediction
-            features = features.reshape((-1, config.sequence_len, features.shape[-1]))
-            prediction = lstm_model.predict(features)[0]
-            # press predicted keys and display prediction
-            output_key(prediction)
+    desired_interval = config.sequence_stride / config.fps_at_recording_time
+    while True:
+        counter += 1
+        current_time = time.time()
+        img = get_screencap_img(sct)
+        img = val_transform(image=img)["image"]
+
+        image_buffer.append((current_time, img))    # timestamp for selecting images with best stride
+        selected_images = select_images(image_buffer, desired_interval, config.sequence_len)
+
+        img_tensor = torch.stack(selected_images, dim=0)   # first timedim, then batch
+        img_tensor = img_tensor[None, ...]
+        img_tensor = img_tensor.pin_memory().to("cuda")
+        prediction, _ = model(img_tensor)
+        prediction = torch.nn.functional.sigmoid(prediction)
+        simple_output_key(prediction)
+        key = key_check()
         if (time.time() - t) >= 1:
             print("fps:", counter)
             counter = 0
             t = time.time()
-        key = key_check()
         if "T" in key:
             release_all()
             break
         if "N" in key:
             release_all()
-            images = []
             time.sleep(5)
         if "X" in key:
             t_time = max(0.01, t_time - 0.01)
@@ -221,51 +260,34 @@ def main_with_lstm():
             print(t_time)
 
 
-def main_combined_model():
-    global t_time
-    setup_tf()
-    t = time.time()
-    # load pretrained CNN+LSTM model here
-    model = load_model(config.model_name)
-    print("Model took:", time.time() - t, "to load.")
-    model.summary()
-    sct = mss.mss()
-    counter = 0
-    t = time.time()
-    max_t_time = round(1.0 / utils.get_fps_ratio(), 2)  # round to 2 digits
-    images = []
-    while 1:
-        counter += 1
-        img = get_screencap_img(sct)
+def select_images(image_buffer, desired_interval, sequence_len):
+    if len(image_buffer) < 2:
+        return [img for _, img in image_buffer]
 
-        if len(images) < config.sequence_len:
-            images.append(img)
-        else:
-            images.pop(0)  # remove oldest image
-            images.append(img)  # always have last seq_len images, put newest image at the end
-            # create numpy array from list and reshape to correct dimensions, height, then width!!!!!!!!
-            input_arr = np.expand_dims(np.stack(images, axis=0), axis=0)
-            prediction = model.predict(input_arr)[0]
-            # press predicted keys and display prediction
-            output_key(prediction)
-        if (time.time() - t) >= 1:
-            print("fps:", counter)
-            counter = 0
-            t = time.time()
-        key = key_check()
-        if "T" in key:
-            release_all()
+    current_time = image_buffer[-1][0]
+    selected_images = [image_buffer[-1][1]]  # Start with the most recent image
+
+    # Create a copy of the buffer to avoid modifying the original
+    available_images = list(image_buffer)[:-1]  # Exclude the most recent image
+
+    for i in range(1, sequence_len):
+        if not available_images:
             break
-        if "N" in key:
-            release_all()
-            images = []
-            time.sleep(5)
-        if "X" in key:
-            t_time = max(0.01, t_time - 0.01)
-            print(t_time)
-        if "B" in key:
-            t_time = min(max_t_time, t_time + 0.01)
-            print(t_time)
+
+        target_time = current_time - i * desired_interval
+        best_image_index = min(range(len(available_images)),
+                               key=lambda i: abs(available_images[i][0] - target_time))
+
+        selected_images.append(available_images[best_image_index][1])
+
+        # Remove the selected image and all newer images
+        available_images = available_images[:best_image_index]
+
+    # Pad with the oldest selected image if we don't have enough
+    while len(selected_images) < sequence_len:
+        selected_images.append(selected_images[-1])
+
+    return list(reversed(selected_images))
 
 
 def get_screencap_img(sct):
@@ -278,14 +300,7 @@ def get_screencap_img(sct):
     return img
 
 
-def setup_tf():
-    clear_session()
-    config_var = compat.v1.ConfigProto()
-    config_var.gpu_options.allow_growth = True
-    compat.v1.Session(config=config_var)
-
-
 if __name__ == "__main__":
-    # main_with_cnn()
     main_with_lstm()
+    # main_with_cnn()
     # show_screen()     # check alignment before running model
