@@ -132,7 +132,7 @@ def simple_output_key(prediction):
     press_keys = True
     output_dict = {"w": 0, "a": 1, "s": 2, "d": 3}
     prediction = prediction.cpu().detach().numpy()
-    thresholds = np.array([0.35, 0.5, 0.5, 0.5])     # w a s d
+    thresholds = np.array([0.5, 0.5, 0.5, 0.5])     # w a s d
     result = (prediction >= thresholds).astype(int).squeeze()
     if press_keys:
         if result[0] == 1:
@@ -156,7 +156,7 @@ def simple_output_key(prediction):
         else:
             ReleaseKey(D)
     if np.sum(result) == 0:
-        print("nothing pressed")
+        print("nothing pressed, max val was:", prediction.max())
     else:
         # print which keys are pressed in one line
         print("".join([key for key, value in output_dict.items() if result[value] == 1]))

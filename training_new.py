@@ -25,7 +25,7 @@ eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 fine_tune = False   # train the entire model or just the top
 freeze_non_dino_cnn = False
-init_from = 'scratch' # 'scratch' or 'resume'
+init_from = 'resume' # 'scratch' or 'resume'
 dino_size = "base"
 checkpoint_name = "ckpt.pt"
 metrics_name = "metrics_plot.png"
@@ -35,6 +35,7 @@ train_split = 0.95   # test val split, important to keep it to reproduce obv
 convert_to_greyscale = False
 sequence_len = 2
 sequence_stride = 20
+flip_prob = 0.5
 classifier_type = "bce" # "cce" or "bce"
 
 # adamw optimizer
@@ -48,7 +49,7 @@ grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
 warmup_iters = 400 # how many steps to warm up for
-lr_decay_iters = 15000 # should be ~= max_iters per Chinchilla
+lr_decay_iters = 30000 # should be ~= max_iters per Chinchilla
 min_lr = 5e-6 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
@@ -77,8 +78,8 @@ else:
     id2label = config.outputs
 
 
-train_dataloader = get_dataloader(current_data_dirs, batch_size, train_split, True, classifier_type, sequence_len, sequence_stride, shuffle=True)
-val_dataloader = get_dataloader(current_data_dirs, batch_size, train_split, False, classifier_type, sequence_len, sequence_stride, shuffle=True)
+train_dataloader = get_dataloader(current_data_dirs, batch_size, train_split, True, classifier_type, sequence_len, sequence_stride, flip_prob, shuffle=True)
+val_dataloader = get_dataloader(current_data_dirs, batch_size, train_split, False, classifier_type, sequence_len, sequence_stride, flip_prob, shuffle=True)
 
 
 iter_num = 0

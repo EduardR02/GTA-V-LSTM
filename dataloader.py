@@ -8,6 +8,7 @@ import os
 import bisect
 import cv2
 from matplotlib import pyplot as plt
+import random
 
 
 ADE_MEAN = (0.485, 0.456, 0.406)
@@ -17,10 +18,11 @@ width = 252
 
 
 class H5Dataset(Dataset):
-    def __init__(self, data_dirs, train_split, is_train, classifier_type):
+    def __init__(self, data_dirs, train_split, is_train, classifier_type, flip_prob):
         self.train_split = train_split
         self.is_train = is_train
         self.classifier_type = classifier_type
+        self.flip_prob = flip_prob
         self.transform = train_transform if is_train else val_transform
         self.data_files = [os.path.join(data_dir, f) for data_dir in data_dirs for f in sorted(os.listdir(data_dir))if f.endswith('.h5')]
         self.lookup_table = self._create_lookup_table()
@@ -52,18 +54,19 @@ class H5Dataset(Dataset):
         file_path = self.data_files[file_idx]
 
         with h5py.File(file_path, 'r') as f:
-            data = f['images'][local_idx]
+            image = f['images'][local_idx]
             label = f['labels'][local_idx]
             if self.classifier_type == "bce":
                 label = label.astype(np.int8).flatten()
                 label = self._to_wasd(label)
             else:
                 label = label.flatten().astype(np.float32)
+        if random.random() < self.flip_prob:
+            image, label = self.flip_samples(image, label)
         if self.transform:
-            augmented = self.transform(image=data)
-            data = augmented['image']
+            image = self.transform(image=image)['image']
 
-        return data, label
+        return image, label
 
     def _get_split_idx(self):
         # exclusive for train, first index of val
@@ -85,10 +88,26 @@ class H5Dataset(Dataset):
 
         return new_label.squeeze()
 
+    def flip_samples(self, images, labels):
+        if labels.ndim == 1:
+            augmented = flip_transform(image=images)['image']
+            labels = labels[np.newaxis, :]
+        else:
+            augmented = np.stack([flip_transform(image=images[i])['image'] for i in range(images.shape[0])], axis=0)
+        label = self.flip_labels(labels)
+        return augmented, label.squeeze()
+
+    def flip_labels(self, labels):
+        labels[:, [1, 3]] = labels[:, [3, 1]]
+        # additionally swap wd and wa
+        if self.classifier_type == "cce":
+            labels[:, [4, 5]] = labels[:, [5, 4]]
+        return labels
+
 
 class TimeSeriesDataset(H5Dataset):
-    def __init__(self, data_dirs, train_split, is_train, classifier_type, sequence_len, sequence_stride):
-        super().__init__(data_dirs, train_split, is_train, classifier_type)
+    def __init__(self, data_dirs, train_split, is_train, classifier_type, flip_prob, sequence_len, sequence_stride):
+        super().__init__(data_dirs, train_split, is_train, classifier_type, flip_prob)
         self.sequence_len = sequence_len
         self.sequence_stride = sequence_stride
 
@@ -111,16 +130,22 @@ class TimeSeriesDataset(H5Dataset):
 
             # Get sequence with stride
             indices = range(local_idx, local_idx + self.sequence_len * self.sequence_stride, self.sequence_stride)
-            data = f['images'][indices]
-            label = f['labels'][indices]
+            images = f['images'][indices]
+            labels = f['labels'][indices]
         if self.classifier_type == "bce":
-            label = self._to_wasd(label.astype(np.int8))
+            labels = self._to_wasd(labels.astype(np.int8))
         else:
-            label = label.astype(np.float32)
-
+            labels = labels.astype(np.float32)
+        if random.random() < self.flip_prob:
+            images, labels = self.flip_samples(images, labels)
         if self.transform:
-            data = stack([self.transform(image=data[i])['image'] for i in range(data.shape[0])], dim=0)
-        return data, label
+            images = stack([self.transform(image=images[i])['image'] for i in range(images.shape[0])], dim=0)
+        return images, labels
+
+
+flip_transform = A.Compose([
+    A.HorizontalFlip(p=1),
+])
 
 
 train_transform = A.Compose([
@@ -140,11 +165,11 @@ val_transform = A.Compose([
 ])
 
 
-def get_dataloader(data_dir, batch_size, train_split, is_train, classifier_type, sequence_len=1, sequence_stride=1, shuffle=True):
+def get_dataloader(data_dir, batch_size, train_split, is_train, classifier_type, sequence_len=1, sequence_stride=1, flip_prob=0., shuffle=True):
     if sequence_len > 1:
-        dataset = TimeSeriesDataset(data_dir, train_split, is_train, classifier_type, sequence_len, sequence_stride)
+        dataset = TimeSeriesDataset(data_dir, train_split, is_train, classifier_type, flip_prob, sequence_len, sequence_stride)
     else:
-        dataset = H5Dataset(data_dir, train_split, is_train, classifier_type)
+        dataset = H5Dataset(data_dir, train_split, is_train, classifier_type, flip_prob)
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -163,8 +188,8 @@ def invNormalize(x):
 
 if __name__ == '__main__':
     data_dirs = ['data/turns', 'data/new_data']
-    sequence_len = 1
-    train_loader = get_dataloader(data_dirs, 32, 0.95, True, "cce", sequence_len, 40)
+    sequence_len = 2
+    train_loader = get_dataloader(data_dirs, 32, 0.95, True, "bce", sequence_len, 40, 0.5)
     # vizualize data with matplotlib until stopped
     for data, label in train_loader:
         for i in range(data.shape[0]):
