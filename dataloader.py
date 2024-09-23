@@ -61,7 +61,7 @@ class H5Dataset(Dataset):
                 label = self._to_wasd(label)
             else:
                 label = label.flatten().astype(np.float32)
-        if random.random() < self.flip_prob:
+        if self.is_train and random.random() < self.flip_prob:
             image, label = self.flip_samples(image, label)
         if self.transform:
             image = self.transform(image=image)['image']
@@ -77,7 +77,7 @@ class H5Dataset(Dataset):
         if label.ndim == 1:
             label = label[np.newaxis, :]
 
-        # Create a new array with the same shape as label, but with 4 columns instead of 6
+        # Create a new array with the same shape as label, but with 4 columns instead of 7
         new_label = np.zeros((*label.shape[:-1], 4), dtype=np.float32)
 
         # Use broadcasting to apply the conversion to all sequences at once
@@ -136,7 +136,7 @@ class TimeSeriesDataset(H5Dataset):
             labels = self._to_wasd(labels.astype(np.int8))
         else:
             labels = labels.astype(np.float32)
-        if random.random() < self.flip_prob:
+        if self.is_train and random.random() < self.flip_prob:
             images, labels = self.flip_samples(images, labels)
         if self.transform:
             images = stack([self.transform(image=images[i])['image'] for i in range(images.shape[0])], dim=0)
