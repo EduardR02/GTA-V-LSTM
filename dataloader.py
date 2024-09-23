@@ -9,6 +9,7 @@ import bisect
 import cv2
 from matplotlib import pyplot as plt
 import random
+import config
 
 
 ADE_MEAN = (0.485, 0.456, 0.406)
@@ -30,9 +31,22 @@ class H5Dataset(Dataset):
     def _create_lookup_table(self):
         lookup = []
         total_samples = 0
+        seq_len = 1 if not hasattr(self, 'sequence_len') else self.sequence_len
+        seq_stride = 0 if not hasattr(self, 'sequence_stride') else self.sequence_stride
         for file_path in self.data_files:
             with h5py.File(file_path, 'r') as f:
-                total_samples += f['labels'].shape[0]
+                file_samples = f['labels'].shape[0]
+                if seq_len > 1:
+                    file_samples -= (seq_len - 1) * seq_stride
+                if "stuck" in file_path:
+                    # this is a bit confusing, but we only have to account for the shorter than amt_remove_after_pause
+                    # case (otherwise -0), because we handle the case if it's longer with the sequence_len > 1 case
+                    file_samples -= max(config.amt_remove_after_pause - ((seq_len - 1) * seq_stride), 0)
+                if file_samples <= 0:
+                    print(f"Skipping and removing {file_path} as it has {file_samples} samples (no valid samples)")
+                    self.data_files.remove(file_path)
+                    continue
+                total_samples += file_samples
             lookup.append(total_samples)
         return lookup
 
@@ -52,6 +66,9 @@ class H5Dataset(Dataset):
         local_idx = idx - (self.lookup_table[file_idx - 1] if file_idx > 0 else 0)
 
         file_path = self.data_files[file_idx]
+
+        if "stuck" in file_path:
+            local_idx += config.amt_remove_after_pause
 
         with h5py.File(file_path, 'r') as f:
             image = f['images'][local_idx]
@@ -107,9 +124,9 @@ class H5Dataset(Dataset):
 
 class TimeSeriesDataset(H5Dataset):
     def __init__(self, data_dirs, train_split, is_train, classifier_type, flip_prob, sequence_len, sequence_stride):
-        super().__init__(data_dirs, train_split, is_train, classifier_type, flip_prob)
         self.sequence_len = sequence_len
         self.sequence_stride = sequence_stride
+        super().__init__(data_dirs, train_split, is_train, classifier_type, flip_prob)
 
     def __getitem__(self, idx):
         if not self.is_train:
@@ -119,15 +136,15 @@ class TimeSeriesDataset(H5Dataset):
         local_idx = idx - (self.lookup_table[file_idx - 1] if file_idx > 0 else 0)
 
         file_path = self.data_files[file_idx]
+        total_valid_frames = self.lookup_table[file_idx] - (self.lookup_table[file_idx - 1] if file_idx > 0 else 0)
+        sequence_range = (self.sequence_len - 1) * self.sequence_stride
 
+        if local_idx + sequence_range >= total_valid_frames:
+            # Adjust local_idx to get a valid sequence
+            local_idx = total_valid_frames - sequence_range
+        if "stuck" in file_path:
+            local_idx += max(config.amt_remove_after_pause - sequence_range, 0)
         with h5py.File(file_path, 'r') as f:
-            total_frames = f['labels'].shape[0]
-
-            # Check if we're near the end of the file
-            if local_idx + self.sequence_len * self.sequence_stride > total_frames:
-                # Adjust local_idx to get a valid sequence
-                local_idx = total_frames - self.sequence_len * self.sequence_stride - 1
-
             # Get sequence with stride
             indices = range(local_idx, local_idx + self.sequence_len * self.sequence_stride, self.sequence_stride)
             images = f['images'][indices]
@@ -187,9 +204,9 @@ def invNormalize(x):
 
 
 if __name__ == '__main__':
-    data_dirs = ['data/turns', 'data/new_data']
+    data_dirs = ['data/stuck']
     sequence_len = 2
-    train_loader = get_dataloader(data_dirs, 32, 0.95, True, "bce", sequence_len, 40, 0.5)
+    train_loader = get_dataloader(data_dirs, 1024, 0.95, True, "bce", sequence_len, 40, 0.5)
     # vizualize data with matplotlib until stopped
     for data, label in train_loader:
         for i in range(data.shape[0]):
