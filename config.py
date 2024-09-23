@@ -1,3 +1,5 @@
+import os
+
 width = 240
 height = 180
 lr = 2e-4
@@ -19,19 +21,14 @@ outputs = {"w": 0, "a": 1, "s": 2, "d": 3, "wa": 4, "wd": 5, "nothing": 6}
 outputs_base = {"w": 0, "a": 1, "s": 2, "d": 3, "nothing": 4}
 amt_remove_after_pause = 300
 
-data_dir_name = "data/"
-model_dir_name = "models/"
-lstm_only_dir = model_dir_name + "lstms/lstm_only/"
-lstm_combined_dir = model_dir_name + "lstms/cnn_lstm_combined/"
-cnn_feature_extractor_dir = model_dir_name + "cnns/feature_extraction/"
-cnn_only_name = cnn_feature_extractor_dir + "preprocessed_inception_v5_only_new_data_no_bnorm_freeze_79_55"
-model_name = lstm_only_dir + "2_lay_1_bnorm_512_256_no_classweights"
-load_data_name = data_dir_name + "training_data_for_lstm_rgb_full.npy"
-new_data_dir_name = data_dir_name + "new_data/"
-turns_data_dir_name = data_dir_name + "turns/"
-stuck_data_dir_name = data_dir_name + "stuck/"
-feature_extracted_data_name = data_dir_name + "feature_extracted_data/"
-back_on_road_data_dir_name = data_dir_name + "back_on_road/"
+data_dir_name = "data"
+model_dir_name = "models"
+lstm_dir = os.path.join(model_dir_name, "lstm")
+cnn_dir = os.path.join(model_dir_name, "cnn")
+ckpt_name_cnn = "ckpt.pt"
+ckpt_name_rnn = "ckpt.pt"
+new_data_dir_name = os.path.join(data_dir_name, "new_data")
+turns_data_dir_name = os.path.join(data_dir_name, "turns")
+stuck_data_dir_name = os.path.join(data_dir_name, "stuck")
+back_on_road_data_dir_name = os.path.join(data_dir_name, "back_on_road")
 data_name = f"{width}x{height}_rgb"
-old_data_name = "training_data_rgb_part"
-

@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import math
 import time
 
-current_data_dirs = [config.turns_data_dir_name, config.new_data_dir_name]  # has to be list
+current_data_dirs = [config.turns_data_dir_name, config.stuck_data_dir_name, config.new_data_dir_name]  # has to be list
 
 
 print(torch.backends.cudnn.version())
@@ -25,10 +25,11 @@ eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 fine_tune = False   # train the entire model or just the top
 freeze_non_dino_cnn = False
-init_from = 'resume' # 'scratch' or 'resume'
+init_from = 'scratch' # 'scratch' or 'resume'
 dino_size = "base"
-checkpoint_name = "ckpt.pt"
-metrics_name = "metrics_plot.png"
+load_checkpoint_name = "ckpt.pt"
+save_checkpoint_name = "ckpt.pt"
+metrics_name = "metrics_plot_with_flip.png"
 gradient_accumulation_steps = 1 # used to simulate larger batch sizes
 batch_size = 128    # if gradient_accumulation_steps > 1, this is the micro-batch size
 train_split = 0.95   # test val split, important to keep it to reproduce obv
@@ -100,7 +101,7 @@ def load_model(sample_only=False):
             f"facebook/dinov2-{dino_size}", id2label=id2label, num_labels=len(id2label), classifier_type=classifier_type)
     elif init_from == 'resume':
         print(f"Resuming training from {out_dir}")
-        ckpt_path = os.path.join(out_dir, checkpoint_name)
+        ckpt_path = os.path.join(out_dir, load_checkpoint_name)
         checkpoint = torch.load(ckpt_path, map_location=device)
         model = dino_model.from_pretrained(
             f"facebook/dinov2-{dino_size}", id2label=id2label, num_labels=len(id2label), classifier_type=classifier_type)
@@ -317,9 +318,10 @@ def train_loop():
                         'config': config_dict,
                     }
                     print(f"saving checkpoint to {out_dir}")
-                    torch.save(checkpoint, os.path.join(out_dir, checkpoint_name))
+                    torch.save(checkpoint, os.path.join(out_dir, save_checkpoint_name))
                     if best_val_loss == losses_and_accs['val']:
-                        torch.save(checkpoint, os.path.join(out_dir, checkpoint_name.split(".")[0] + "-best." + checkpoint_name.split(".")[1]))
+                        best_ckpt_name = save_checkpoint_name.split(".")[0] + "-best." + save_checkpoint_name.split(".")[1]
+                        torch.save(checkpoint, os.path.join(out_dir, best_ckpt_name))
             plot_metrics(metrics_dict)
         if iter_num == 0 and eval_only:
             break

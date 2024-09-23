@@ -25,12 +25,13 @@ class H5Dataset(Dataset):
         self.classifier_type = classifier_type
         self.flip_prob = flip_prob
         self.transform = train_transform if is_train else val_transform
-        self.data_files = [os.path.join(data_dir, f) for data_dir in data_dirs for f in sorted(os.listdir(data_dir))if f.endswith('.h5')]
+        self.data_files = [os.path.join(data_dir, f) for data_dir in data_dirs for f in sorted(os.listdir(data_dir)) if f.endswith('.h5')]
         self.lookup_table = self._create_lookup_table()
 
     def _create_lookup_table(self):
         lookup = []
         total_samples = 0
+        # this is dumb but I don't want to make a new function in the child class
         seq_len = 1 if not hasattr(self, 'sequence_len') else self.sequence_len
         seq_stride = 0 if not hasattr(self, 'sequence_stride') else self.sequence_stride
         for file_path in self.data_files:
