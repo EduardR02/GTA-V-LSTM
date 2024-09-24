@@ -17,7 +17,13 @@ threshold_turn = 0
 t_time = 0.05
 
 
-def sleep_and_release(key):
+def sleep_and_release(key, t_time=t_time):
+    time.sleep(t_time)
+    ReleaseKey(key)
+
+
+def press_and_release(key, t_time=t_time):
+    PressKey(key)
     time.sleep(t_time)
     ReleaseKey(key)
 
@@ -134,32 +140,42 @@ def simple_output_key(prediction):
     prediction = prediction.cpu().detach().numpy()
     thresholds = np.array([0.5, 0.5, 0.5, 0.5])     # w a s d
     result = (prediction >= thresholds).astype(int).squeeze()
+
     if press_keys:
-        if result[0] == 1:
-            PressKey(W)
-        else:
-            ReleaseKey(W)
-        if result[1] == 1:
-            PressKey(A)
-            t1 = Worker(target=sleep_and_release, args=(A,))
-            t1.start()
-        else:
-            ReleaseKey(A)
-        if result[2] == 1:
-            PressKey(S)
-        else:
-            ReleaseKey(S)
-        if result[3] == 1:
-            PressKey(D)
-            t2 = Worker(target=sleep_and_release, args=(D,))
-            t2.start()
-        else:
-            ReleaseKey(D)
+        for key, value in output_dict.items():
+            if result[value] == 1:
+                PressKey(key)
+                if key in "ad":
+                    worker = Worker(target=sleep_and_release, args=(key,))
+                    worker.start()
+            else:
+                ReleaseKey(key)
+
     if np.sum(result) == 0:
         print("nothing pressed, max val was:", prediction.max())
     else:
-        # print which keys are pressed in one line
-        print("".join([key for key, value in output_dict.items() if result[value] == 1]))
+        print(",".join([key + "-" + prediction[value] for key, value in output_dict.items() if result[value] == 1]))
+
+
+def proportional_output_key(prediction, fps):
+    output_dict = {"w": 0, "a": 1, "s": 2, "d": 3}
+    min_val = 0.001
+    prediction = prediction.cpu().detach().numpy().squeeze()
+    # Normalize predictions to a reasonable key press duration (e.g., 0 to time to next prediction)
+    press_durations = prediction / fps
+    press_durations_thresholded = np.where(press_durations < min_val, 0, press_durations)
+
+    # Press and release keys based on the prediction values using sleep_and_release
+    for key, duration in zip([W, A, S, D], press_durations_thresholded):
+        if duration > 0:
+            worker = Worker(target=press_and_release, args=(key, duration))
+            worker.start()
+
+    if np.sum(press_durations_thresholded) == 0:
+        print("Nothing pressed, max val was:", prediction.max())
+    else:
+        pressed_keys = [key + "-" + str(press_durations_thresholded[value]) for key, value in output_dict.items() if press_durations_thresholded[value] > 0]
+        print("Keys pressed:", ", ".join(pressed_keys))
 
 
 # noinspection PyTypeChecker
