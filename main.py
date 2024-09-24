@@ -161,6 +161,9 @@ def proportional_output_key(prediction, fps):
     output_dict = {"w": 0, "a": 1, "s": 2, "d": 3}
     min_val = 0.001
     prediction = prediction.cpu().detach().numpy().squeeze()
+    # do this before thresholding to get the true values
+    prediction = handle_opposite_keys(prediction, 1)
+    prediction = handle_opposite_keys(prediction, 0)
     # Normalize predictions to a reasonable key press duration (e.g., 0 to time to next prediction)
     press_durations = prediction / fps
     press_durations_thresholded = np.where(press_durations < min_val, 0, press_durations)
@@ -176,6 +179,16 @@ def proportional_output_key(prediction, fps):
     else:
         pressed_keys = [key + "-" + str(press_durations_thresholded[value]) for key, value in output_dict.items() if press_durations_thresholded[value] > 0]
         print("Keys pressed:", ", ".join(pressed_keys))
+
+
+def handle_opposite_keys(prediction, idx):
+    if prediction[idx] > prediction[idx + 2]:
+        prediction[idx] -= prediction[idx + 2]
+        prediction[idx + 2] = 0
+    else:
+        prediction[idx + 2] -= prediction[idx]
+        prediction[idx] = 0
+    return prediction
 
 
 # noinspection PyTypeChecker
