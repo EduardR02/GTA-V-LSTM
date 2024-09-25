@@ -20,16 +20,16 @@ print(torch.version.cuda)
 out_dir = os.path.join('models', 'lstm')
 eval_interval = 300
 log_interval = 1
-eval_iters = 8
+eval_iters = 10
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 fine_tune = False   # train the entire model or just the top
 freeze_non_dino_layers = False
-init_from = 'scratch' # 'scratch' or 'resume'
+init_from = 'resume' # 'scratch' or 'resume'
 dino_size = "base"
 load_checkpoint_name = "ckpt.pt"
 save_checkpoint_name = "ckpt.pt"
-metrics_name = "metrics_plot_with_warp_and_flip.png"
+metrics_name = "metrics_plot_with_warp_and_flip_2.png"
 gradient_accumulation_steps = 1 # used to simulate larger batch sizes
 batch_size = 128    # if gradient_accumulation_steps > 1, this is the micro-batch size
 train_split = 0.95   # test val split, keep same for resume
@@ -44,10 +44,10 @@ classifier_type = "bce" # "cce" or "bce"
 learning_rate = 3e-4 # max learning rate
 max_iters = 60000 # total number of training iterations
 # optimizer settings
-weight_decay = 1e-2
+weight_decay = 5e-2
 beta1 = 0.9
 beta2 = 0.995
-grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
+grad_clip = 0.0 # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
 warmup_iters = 400 # how many steps to warm up for
@@ -100,21 +100,13 @@ def load_model(sample_only=False):
         dino_model = Dinov2ForClassification
     if init_from == 'scratch':
         print("Initializing a new model from scratch")
-        model = dino_model.from_pretrained(
-            f"facebook/dinov2-{dino_size}", id2label=id2label, num_labels=len(id2label), classifier_type=classifier_type)
+        model = dino_model(dino_size, len(id2label), classifier_type=classifier_type)
     elif init_from == 'resume':
         print(f"Resuming training from {out_dir}")
         ckpt_path = os.path.join(out_dir, load_checkpoint_name)
         checkpoint = torch.load(ckpt_path, map_location=device)
-        model = dino_model.from_pretrained(
-            f"facebook/dinov2-{dino_size}", id2label=id2label, num_labels=len(id2label), classifier_type=classifier_type)
+        model = dino_model(dino_size, len(id2label), classifier_type=classifier_type)
         state_dict = checkpoint['model']
-        # fix the keys of the state dictionary :(
-        # honestly no idea how checkpoints sometimes get this prefix, have to debug more
-        unwanted_prefix = '_orig_mod.'
-        for k,v in list(state_dict.items()):
-            if k.startswith(unwanted_prefix):
-                state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
         model.load_state_dict(state_dict, strict=False)
         iter_num = checkpoint['iter_num']
         iter_num_on_load = iter_num
@@ -179,17 +171,19 @@ def estimate_loss(model):
         X, Y, Y_CPU, dataloader_iter = get_batch(dataloader_iter, split)
         losses = torch.zeros(eval_iters * gradient_accumulation_steps)
         accuracies = torch.zeros(eval_iters * gradient_accumulation_steps)
+        Y_CPU_NEW = None
         for k in range(eval_iters * gradient_accumulation_steps):
             with ctx:
                 logits, loss = model(X, labels=Y)
             # async prefetch next batch while model is doing the forward pass on the GPU
             if k < eval_iters * gradient_accumulation_steps - 1:
                 X, Y, Y_CPU_NEW, dataloader_iter = get_batch(dataloader_iter, split)
-            losses[k] = loss.item()
+            losses[k] = loss.cpu().item()
             accuracies[k] = calc_accuracy(logits, Y_CPU)
             Y_CPU = Y_CPU_NEW
         out[split] = losses.mean()
         out[split + "_accuracy"] = accuracies.mean()
+    del X, Y, Y_CPU, Y_CPU_NEW, dataloader_iter, loss
     torch.cuda.empty_cache()
     model.train()
     return out
@@ -318,8 +312,9 @@ def train_loop():
             if losses_and_accs['val'] < best_val_loss or always_save_checkpoint:
                 best_val_loss = losses_and_accs['val'] if losses_and_accs['val'] < best_val_loss else best_val_loss
                 if iter_num > 0:
+                    state_dict = model.state_dict() if fine_tune else {k: v for k, v in model.state_dict().items() if not k.startswith("dinov2")}
                     checkpoint = {
-                        'model': model.state_dict(),
+                        'model': state_dict,
                         'optimizer': optimizer.state_dict(),
                         'iter_num': iter_num,
                         'best_val_loss': best_val_loss,
@@ -330,6 +325,7 @@ def train_loop():
                     if best_val_loss == losses_and_accs['val']:
                         best_ckpt_name = save_checkpoint_name.split(".")[0] + "-best." + save_checkpoint_name.split(".")[1]
                         torch.save(checkpoint, os.path.join(out_dir, best_ckpt_name))
+                    del state_dict, checkpoint
             plot_metrics(metrics_dict)
         if iter_num == 0 and eval_only:
             break

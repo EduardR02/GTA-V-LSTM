@@ -1,5 +1,5 @@
 import torch
-from transformers import Dinov2Model, Dinov2PreTrainedModel
+from transformers import Dinov2Model, Dinov2Config
 
 
 class TransferNetwork(torch.nn.Module):
@@ -31,23 +31,24 @@ class TransferNetwork(torch.nn.Module):
         return self.classifier_out(embeddings)
 
 
-class Dinov2ForClassification(Dinov2PreTrainedModel):
-    def __init__(self, config, classifier_type):
-        super().__init__(config)
-        self.dinov2 = Dinov2Model(config)
-        self.classifier = TransferNetwork(config.hidden_size, 18, 13, config.num_labels)
+class Dinov2ForClassification(torch.nn.Module):
+    def __init__(self, size, num_classes, classifier_type):
+        super().__init__()
+        self.size = size
+        self.num_classes = num_classes
+        self.dinov2_config = Dinov2Config.from_pretrained(f"facebook/dinov2-{size}")
+        self.dinov2_config.attention_module = "xformers"
+        self.dinov2 = Dinov2Model.from_pretrained(f"facebook/dinov2-{size}", config=self.dinov2_config)
+        self.classifier = TransferNetwork(self.dinov2_config.hidden_size, 18, 13, num_classes)
         self.classifier_type = classifier_type
         if self.classifier_type == "bce":
             self.loss_fct = torch.nn.BCEWithLogitsLoss()
         else:
             self.loss_fct = torch.nn.CrossEntropyLoss()
 
-    def forward(self, pixel_values, output_hidden_states=False, output_attentions=False, labels=None):
-        outputs = self.dinov2(pixel_values,
-                              output_hidden_states=output_hidden_states,
-                              output_attentions=output_attentions)
-        # get the patch embeddings - so we exclude the CLS token
-        patch_embeddings = outputs.last_hidden_state[:, 1:, :]
+    def forward(self, pixel_values, labels=None):
+        outputs = self.dinov2(pixel_values)
+        patch_embeddings = outputs.last_hidden_state[:, 1:, :]    # remove cls token
         # pass the output patch embeddings through the classifier
         logits = self.classifier(patch_embeddings)
         loss = None
@@ -98,9 +99,9 @@ class TransferNetworkRNN(TransferNetwork):
 
 
 class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
-    def __init__(self, config, classifier_type):
-        super().__init__(config, classifier_type)
-        self.classifier = TransferNetworkRNN(config.hidden_size, 18, 13)
+    def __init__(self, size, num_classes, classifier_type):
+        super().__init__(size, num_classes, classifier_type)
+        self.classifier = TransferNetworkRNN(self.dinov2_config.hidden_size, 18, 13)
 
         # LSTM layer
         self.rnn_hidden_size = 128
@@ -121,7 +122,7 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
         # By default it is False, so each dataloader actually goes through the entire dataset once.
         # The loss jump is just normal epoch behavior then.
         # https://pytorch.org/docs/stable/generated/torch.nn.LSTM.html
-        self.rnn = torch.nn.GRU(
+        self.rnn = torch.nn.LSTM(
             input_size=self.classifier.feature_size,  # Features + previous labels
             hidden_size=self.rnn_hidden_size,
             num_layers=1,
@@ -129,37 +130,20 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
             bias=False
         )
         self.layer_norm_3 = torch.nn.LayerNorm(self.rnn_hidden_size)
-        # Final classification layer
-        self.final_linear_layer = torch.nn.Linear(self.rnn_hidden_size, config.num_labels)
+        self.final_linear_layer = torch.nn.Linear(self.rnn_hidden_size, self.num_classes)
 
-    def forward(self, pixel_values, output_hidden_states=False, output_attentions=False, labels=None):
+    def forward(self, pixel_values, labels=None):
         batch_size, time_steps, channels, height, width = pixel_values.shape
 
         # Process each time step
         features = []
         for t in range(time_steps):
-            outputs = self.dinov2(
-                pixel_values[:, t],
-                output_hidden_states=output_hidden_states,
-                output_attentions=output_attentions
-            )
-            patch_embeddings = outputs.last_hidden_state[:, 1:, :]
+            outputs = self.dinov2(pixel_values[:, t])
+            patch_embeddings = outputs.last_hidden_state[:, 1:, :]  # remove cls token
             features.append(self.classifier(patch_embeddings))
 
         # Stack features from all time steps
         features = torch.stack(features, dim=1)  # Shape: (batch_size, time_steps, feature_size)
-        # Prepare input for LSTM (including previous labels if available)
-        if labels is not None:
-            # Assume labels are of shape (batch_size, time_steps, num_labels)
-            # all_except_last_label = labels[:, :-1, :]
-            # lstm_input = torch.cat([features, labels], dim=-1)
-            pass
-        else:
-            # If no labels available (e.g., during inference), use zeros
-            # dummy_labels = torch.zeros(batch_size, time_steps, self.config.num_labels, device=features.device)
-            # lstm_input = torch.cat([features, dummy_labels], dim=-1)
-            pass
-        # Process through LSTM
         rnn_out, _ = self.rnn(features)
         rnn_last_output = rnn_out[:, -1, :]
 
@@ -169,6 +153,6 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
         loss = None
         if labels is not None:
             last_label = labels[:, -1, :]
-            loss = self.loss_fct(logits.view(-1, self.config.num_labels), last_label.view(-1, self.config.num_labels))
+            loss = self.loss_fct(logits.view(-1, self.num_classes), last_label.view(-1, self.num_classes))
 
         return logits, loss
