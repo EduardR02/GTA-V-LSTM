@@ -25,19 +25,19 @@ eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 fine_tune = False   # train the entire model or just the top
 freeze_non_dino_layers = False
-init_from = 'resume' # 'scratch' or 'resume'
+init_from = 'scratch' # 'scratch' or 'resume'
 dino_size = "base"
 load_checkpoint_name = "ckpt.pt"
 save_checkpoint_name = "ckpt.pt"
-metrics_name = "metrics_plot_with_flip_continue.png"
+metrics_name = "metrics_plot_with_warp_and_flip.png"
 gradient_accumulation_steps = 1 # used to simulate larger batch sizes
 batch_size = 128    # if gradient_accumulation_steps > 1, this is the micro-batch size
 train_split = 0.95   # test val split, keep same for resume
 convert_to_greyscale = False
 sequence_len = 2
 sequence_stride = 20
-flip_prob = 0.1
-warp_prob = 0.15
+flip_prob = 0.2
+warp_prob = 0.2
 classifier_type = "bce" # "cce" or "bce"
 
 # adamw optimizer
@@ -176,16 +176,21 @@ def estimate_loss(model):
     model.eval()
     for split in ['train', 'val']:
         dataloader_iter = iter(train_dataloader if split == 'train' else val_dataloader)
+        X, Y, Y_CPU, dataloader_iter = get_batch(dataloader_iter, split)
         losses = torch.zeros(eval_iters * gradient_accumulation_steps)
         accuracies = torch.zeros(eval_iters * gradient_accumulation_steps)
         for k in range(eval_iters * gradient_accumulation_steps):
-            X, Y, Y_CPU, dataloader_iter = get_batch(dataloader_iter, split)
             with ctx:
                 logits, loss = model(X, labels=Y)
+            # async prefetch next batch while model is doing the forward pass on the GPU
+            if k < eval_iters * gradient_accumulation_steps - 1:
+                X, Y, Y_CPU_NEW, dataloader_iter = get_batch(dataloader_iter, split)
             losses[k] = loss.item()
             accuracies[k] = calc_accuracy(logits, Y_CPU)
+            Y_CPU = Y_CPU_NEW
         out[split] = losses.mean()
         out[split + "_accuracy"] = accuracies.mean()
+    torch.cuda.empty_cache()
     model.train()
     return out
 
