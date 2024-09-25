@@ -14,16 +14,24 @@ import config
 
 ADE_MEAN = (0.485, 0.456, 0.406)
 ADE_STD = (0.229, 0.224, 0.225)
-height = 182
-width = 252
+height = 182    # 14 * 13
+width = 252     # 14 * 18
+minimap_mask = np.zeros((config.height, config.width), dtype=np.uint8)
+# Minimap coordinates, (before padding for patches)
+x1, y1 = 3, config.height - 36  # Top-left corner of minimap
+x2, y2 = 50, config.height - 3  # Bottom-right corner of minimap
+
+minimap_mask[y1:y2, x1:x2] = 1
+minimap_mask_horizontally_flipped = np.fliplr(minimap_mask)
 
 
 class H5Dataset(Dataset):
-    def __init__(self, data_dirs, train_split, is_train, classifier_type, flip_prob):
+    def __init__(self, data_dirs, train_split, is_train, classifier_type, flip_prob, warp_prob):
         self.train_split = train_split
         self.is_train = is_train
         self.classifier_type = classifier_type
         self.flip_prob = flip_prob
+        self.warp_prob = warp_prob
         self.transform = train_transform if is_train else val_transform
         self.data_files = [os.path.join(data_dir, f) for data_dir in data_dirs for f in sorted(os.listdir(data_dir)) if f.endswith('.h5')]
         self.lookup_table = self._create_lookup_table()
@@ -79,8 +87,7 @@ class H5Dataset(Dataset):
                 label = self._to_wasd(label)
             else:
                 label = label.flatten().astype(np.float32)
-        if self.is_train and random.random() < self.flip_prob:
-            image, label = self.flip_samples(image, label)
+        image, label = self.apply_custom_augmentations(image, label)
         if self.transform:
             image = self.transform(image=image)['image']
 
@@ -108,10 +115,10 @@ class H5Dataset(Dataset):
 
     def flip_samples(self, images, labels):
         if labels.ndim == 1:
-            augmented = flip_transform(image=images)['image']
+            augmented = flip_image_with_minimap(images)
             labels = labels[np.newaxis, :]
         else:
-            augmented = np.stack([flip_transform(image=images[i])['image'] for i in range(images.shape[0])], axis=0)
+            augmented = np.stack([flip_image_with_minimap(images[i]) for i in range(images.shape[0])], axis=0)
         label = self.flip_labels(labels)
         return augmented, label.squeeze()
 
@@ -122,12 +129,21 @@ class H5Dataset(Dataset):
             labels[:, [4, 5]] = labels[:, [5, 4]]
         return labels
 
+    def apply_custom_augmentations(self, images, labels):
+        if not self.is_train:
+            return images, labels
+        if random.random() < self.warp_prob:
+            images = np.stack([diagonal_warp(images[i]) for i in range(images.shape[0])], axis=0)
+        if random.random() < self.flip_prob:
+            images, labels = self.flip_samples(images, labels)
+        return images, labels
+
 
 class TimeSeriesDataset(H5Dataset):
-    def __init__(self, data_dirs, train_split, is_train, classifier_type, flip_prob, sequence_len, sequence_stride):
+    def __init__(self, data_dirs, train_split, is_train, classifier_type, flip_prob, warp_prob, sequence_len, sequence_stride):
         self.sequence_len = sequence_len
         self.sequence_stride = sequence_stride
-        super().__init__(data_dirs, train_split, is_train, classifier_type, flip_prob)
+        super().__init__(data_dirs, train_split, is_train, classifier_type, flip_prob, warp_prob)
 
     def __getitem__(self, idx):
         if not self.is_train:
@@ -154,21 +170,60 @@ class TimeSeriesDataset(H5Dataset):
             labels = self._to_wasd(labels.astype(np.int8))
         else:
             labels = labels.astype(np.float32)
-        if self.is_train and random.random() < self.flip_prob:
-            images, labels = self.flip_samples(images, labels)
+        images, labels = self.apply_custom_augmentations(images, labels)
         if self.transform:
             images = stack([self.transform(image=images[i])['image'] for i in range(images.shape[0])], dim=0)
         return images, labels
 
 
-flip_transform = A.Compose([
-    A.HorizontalFlip(p=1),
-])
+def diagonal_warp(image, max_shift=20, direction='left'):
+    height, width = image.shape[:2]
+
+    # Black out the minimap area
+    image_masked = np.copy(image)
+    image_masked[y1:y2, x1:x2] = 0  # Black out the minimap area
+
+    # Generate shift values for each row
+    if direction == 'left':
+        row_shifts = np.linspace(0, max_shift, height, dtype=int)
+    else:
+        row_shifts = np.linspace(0, -max_shift, height, dtype=int)
+
+    # Create meshgrid for indices
+    x_indices = np.tile(np.arange(width), (height, 1))
+
+    # Apply shifts using broadcasting
+    shifted_indices = (x_indices + row_shifts[:, None]) % width
+
+    # Apply warp using advanced indexing
+    warped_image = image_masked[np.arange(height)[:, None], shifted_indices]
+
+    # Use reflect padding (Reflect101 in OpenCV) to fill in black areas
+    warped_image = cv2.copyMakeBorder(warped_image, 0, 0, max_shift, max_shift, cv2.BORDER_REFLECT_101)
+    warped_image = warped_image[:, max_shift:max_shift + width]  # Crop back to original size
+
+    # Reinsert the minimap back into the warped image
+    warped_image[y1:y2, x1:x2] = image[y1:y2, x1:x2]
+
+    return warped_image
+
+
+def flip_image_with_minimap(image):
+    # Extract minimap and flip it independently (centered around itself)
+    flipped_minimap = np.fliplr(np.copy(image[y1:y2, x1:x2]))
+    image[y1:y2, x1:x2] = 0  # Black out minimap
+    # Flip the entire image horizontally
+    image = np.fliplr(image)
+    # Reinsert flipped minimap into its original location in the flipped image
+    image[y1:y2, x1:x2] = flipped_minimap
+    # Inpaint the flipped minimap area
+    image = cv2.inpaint(image, minimap_mask_horizontally_flipped, inpaintRadius=3, flags=cv2.INPAINT_NS)
+
+    return image
 
 
 train_transform = A.Compose([
-    # A.LongestMaxSize(max_size=max(height, width)),  # Resize the longest side to match the input size
-    A.PadIfNeeded(min_height=height, min_width=width, border_mode=cv2.BORDER_CONSTANT, value=0),  # Pad the smaller side
+    A.PadIfNeeded(min_height=height, min_width=width, border_mode=cv2.BORDER_CONSTANT, value=0),
     A.RandomBrightnessContrast(p=0.5),
     A.Normalize(mean=ADE_MEAN, std=ADE_STD, max_pixel_value=255.0),
     ToTensorV2(),
@@ -176,18 +231,17 @@ train_transform = A.Compose([
 
 
 val_transform = A.Compose([
-    # A.LongestMaxSize(max_size=max(height, width)),  # Resize the longest side to match the input size
-    A.PadIfNeeded(min_height=height, min_width=width, border_mode=cv2.BORDER_CONSTANT, value=0),  # Pad the smaller side
+    A.PadIfNeeded(min_height=height, min_width=width, border_mode=cv2.BORDER_CONSTANT, value=0),
     A.Normalize(mean=ADE_MEAN, std=ADE_STD, max_pixel_value=255.0),
     ToTensorV2(),
 ])
 
 
-def get_dataloader(data_dir, batch_size, train_split, is_train, classifier_type, sequence_len=1, sequence_stride=1, flip_prob=0., shuffle=True):
+def get_dataloader(data_dir, batch_size, train_split, is_train, classifier_type, sequence_len=1, sequence_stride=1, flip_prob=0., warp_prob=0., shuffle=True):
     if sequence_len > 1:
-        dataset = TimeSeriesDataset(data_dir, train_split, is_train, classifier_type, flip_prob, sequence_len, sequence_stride)
+        dataset = TimeSeriesDataset(data_dir, train_split, is_train, classifier_type, flip_prob, warp_prob, sequence_len, sequence_stride)
     else:
-        dataset = H5Dataset(data_dir, train_split, is_train, classifier_type, flip_prob)
+        dataset = H5Dataset(data_dir, train_split, is_train, classifier_type, flip_prob, warp_prob)
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -204,10 +258,10 @@ def invNormalize(x):
     return (x * np.array(ADE_STD)[None, None, :]) + np.array(ADE_MEAN)[None, None, :]
 
 
-if __name__ == '__main__':
-    data_dirs = ['data/stuck']
-    sequence_len = 2
-    train_loader = get_dataloader(data_dirs, 1024, 0.95, True, "bce", sequence_len, 40, 0.5)
+def test_dataloader():
+    data_dirs = ['data/turns']
+    sequence_len = 1
+    train_loader = get_dataloader(data_dirs, 32, 0.95, True, "bce", sequence_len, 40, 1, 0)
     # vizualize data with matplotlib until stopped
     for data, label in train_loader:
         for i in range(data.shape[0]):
@@ -226,3 +280,6 @@ if __name__ == '__main__':
                 plt.imshow(img)
                 plt.show()
 
+
+if __name__ == '__main__':
+    test_dataloader()
