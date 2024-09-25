@@ -24,6 +24,10 @@ x2, y2 = 50, config.height - 3  # Bottom-right corner of minimap
 minimap_mask[y1:y2, x1:x2] = 1
 minimap_mask_horizontally_flipped = np.fliplr(minimap_mask)
 
+valid_warp_label = np.array([1, 0, 0, 0], dtype=np.int8)
+min_warp_shift = 50
+max_warp_shift = 100
+
 
 class H5Dataset(Dataset):
     def __init__(self, data_dirs, train_split, is_train, classifier_type, flip_prob, warp_prob):
@@ -118,7 +122,7 @@ class H5Dataset(Dataset):
             augmented = flip_image_with_minimap(images)
             labels = labels[np.newaxis, :]
         else:
-            augmented = np.stack([flip_image_with_minimap(images[i]) for i in range(images.shape[0])], axis=0)
+            augmented = [flip_image_with_minimap(img) for img in images]
         label = self.flip_labels(labels)
         return augmented, label.squeeze()
 
@@ -133,7 +137,7 @@ class H5Dataset(Dataset):
         if not self.is_train:
             return images, labels
         if random.random() < self.warp_prob:
-            images = np.stack([diagonal_warp(images[i]) for i in range(images.shape[0])], axis=0)
+            images, labels = warp_samples(images, labels)
         if random.random() < self.flip_prob:
             images, labels = self.flip_samples(images, labels)
         return images, labels
@@ -172,52 +176,90 @@ class TimeSeriesDataset(H5Dataset):
             labels = labels.astype(np.float32)
         images, labels = self.apply_custom_augmentations(images, labels)
         if self.transform:
-            images = stack([self.transform(image=images[i])['image'] for i in range(images.shape[0])], dim=0)
+            images = stack([self.transform(image=img)['image'] for img in images], dim=0)
         return images, labels
 
 
-def diagonal_warp(image, max_shift=20, direction='left'):
-    height, width = image.shape[:2]
+def warp_samples(images, labels):
+    if labels.ndim == 1:
+        labels = labels[np.newaxis, :]
+    # if label we want to perdict is not w or "nothing", don't warp
+    if np.any(labels[-1] != valid_warp_label) and np.any(labels[-1]):
+        return images, labels.squeeze()
 
-    # Black out the minimap area
-    image_masked = np.copy(image)
-    image_masked[y1:y2, x1:x2] = 0  # Black out the minimap area
-
-    # Generate shift values for each row
-    if direction == 'left':
-        row_shifts = np.linspace(0, max_shift, height, dtype=int)
+    shift = random.randint(min_warp_shift, max_warp_shift)
+    direction = 'left' if random.random() < 0.5 else 'right'
+    labels = handle_labels_warp(labels, direction)
+    if images.ndim == 3:
+        return diagonal_warp(images, shift, direction), labels
     else:
-        row_shifts = np.linspace(0, -max_shift, height, dtype=int)
+        # not sure if it makes sense to gradually decrease the warp when getting closer to the last image
+        return [diagonal_warp(img, shift, direction) for img in images], labels
+
+
+def handle_labels_warp(labels, direction):
+    # not sure if we should adjust the non last labels, for now we don't use them though
+    # if the image was shifted to the left, from car pov it looks like we
+    # are more right than before, so we should correct by steering left
+    if direction == 'left':
+        labels[-1][1] = 1   # [w, a, s, d]
+    else:
+        labels[-1][3] = 1
+    return labels.squeeze()
+
+
+def diagonal_warp(image, shift, direction):
+    """
+    https://blog.comma.ai/end-to-end-lateral-planning/
+    this describes the problem of not being able to self correct, so i tried recreating the solution somewhat
+    this being kind of the solution (should also apply KL loss to feature vector, but I usually freeze it anyway)
+
+    It probably makes sense to only apply this augmentation when the label is "w" (going straight), so that we
+    can change it to "wa" or "wd" to correct itself
+    """
+    height, width = image.shape[:2]
+    minimap = np.copy(image[y1:y2, x1:x2])  # extract minimap
+    # This just works, no need to black out the minimap
+    image = cv2.inpaint(image, minimap_mask, inpaintRadius=3, flags=cv2.INPAINT_NS)
+    # Generate shift values for each row, this makes it so the shift is from the center, so both top and bottom "drift"
+    if direction == 'left':
+        row_shifts = np.linspace(-int(shift/2), int(shift/2), height, dtype=int)
+    else:
+        row_shifts = np.linspace(int(shift/2), -int(shift/2), height, dtype=int)
 
     # Create meshgrid for indices
     x_indices = np.tile(np.arange(width), (height, 1))
-
     # Apply shifts using broadcasting
     shifted_indices = (x_indices + row_shifts[:, None]) % width
-
     # Apply warp using advanced indexing
-    warped_image = image_masked[np.arange(height)[:, None], shifted_indices]
+    image = image[np.arange(height)[:, None], shifted_indices]
 
-    # Use reflect padding (Reflect101 in OpenCV) to fill in black areas
-    warped_image = cv2.copyMakeBorder(warped_image, 0, 0, max_shift, max_shift, cv2.BORDER_REFLECT_101)
-    warped_image = warped_image[:, max_shift:max_shift + width]  # Crop back to original size
-
+    # Apply zoom using Albumentations
+    zoom_transform = A.Compose([
+        A.Affine(scale=1 + (shift / width), p=1),
+    ])
+    image = zoom_transform(image=image)['image']
     # Reinsert the minimap back into the warped image
-    warped_image[y1:y2, x1:x2] = image[y1:y2, x1:x2]
+    image[y1:y2, x1:x2] = minimap
 
-    return warped_image
+    return image
 
 
 def flip_image_with_minimap(image):
+    """
+    This is nice and all, esp with the minimap flip, but the problem is that this makes you
+    drive on the wrong side lol... Not sure if this is a good thing to teach the model, even
+    though it's kind of nice for augmenting turns,
+    because each turn becomes and example for both a left and a right turn.
+    """
     # Extract minimap and flip it independently (centered around itself)
     flipped_minimap = np.fliplr(np.copy(image[y1:y2, x1:x2]))
-    image[y1:y2, x1:x2] = 0  # Black out minimap
+    # don't need to black out first, this just works
+    image = cv2.inpaint(image, minimap_mask, inpaintRadius=3, flags=cv2.INPAINT_NS)
     # Flip the entire image horizontally
     image = np.fliplr(image)
     # Reinsert flipped minimap into its original location in the flipped image
     image[y1:y2, x1:x2] = flipped_minimap
-    # Inpaint the flipped minimap area
-    image = cv2.inpaint(image, minimap_mask_horizontally_flipped, inpaintRadius=3, flags=cv2.INPAINT_NS)
 
     return image
 
@@ -260,8 +302,8 @@ def invNormalize(x):
 
 def test_dataloader():
     data_dirs = ['data/turns']
-    sequence_len = 1
-    train_loader = get_dataloader(data_dirs, 32, 0.95, True, "bce", sequence_len, 40, 1, 0)
+    sequence_len = 2
+    train_loader = get_dataloader(data_dirs, 32, 0.95, True, "bce", sequence_len, 40, 1, 1)
     # vizualize data with matplotlib until stopped
     for data, label in train_loader:
         for i in range(data.shape[0]):

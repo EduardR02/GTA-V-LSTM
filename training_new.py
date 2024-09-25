@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import math
 import time
 
-current_data_dirs = [config.turns_data_dir_name, config.stuck_data_dir_name, config.new_data_dir_name]  # has to be list
+current_data_dirs = [config.stuck_data_dir_name, config.new_data_dir_name]  # has to be list
 
 
 print(torch.backends.cudnn.version())
@@ -24,23 +24,24 @@ eval_iters = 8
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 fine_tune = False   # train the entire model or just the top
-freeze_non_dino_cnn = False
-init_from = 'scratch' # 'scratch' or 'resume'
+freeze_non_dino_layers = False
+init_from = 'resume' # 'scratch' or 'resume'
 dino_size = "base"
 load_checkpoint_name = "ckpt.pt"
 save_checkpoint_name = "ckpt.pt"
-metrics_name = "metrics_plot_with_flip.png"
+metrics_name = "metrics_plot_with_flip_continue.png"
 gradient_accumulation_steps = 1 # used to simulate larger batch sizes
 batch_size = 128    # if gradient_accumulation_steps > 1, this is the micro-batch size
-train_split = 0.95   # test val split, important to keep it to reproduce obv
+train_split = 0.95   # test val split, keep same for resume
 convert_to_greyscale = False
 sequence_len = 2
 sequence_stride = 20
-flip_prob = 0.5
+flip_prob = 0.1
+warp_prob = 0.15
 classifier_type = "bce" # "cce" or "bce"
 
 # adamw optimizer
-learning_rate = 1e-4 # max learning rate
+learning_rate = 3e-4 # max learning rate
 max_iters = 60000 # total number of training iterations
 # optimizer settings
 weight_decay = 1e-2
@@ -51,7 +52,7 @@ grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
 decay_lr = True # whether to decay the learning rate
 warmup_iters = 400 # how many steps to warm up for
 lr_decay_iters = 30000 # should be ~= max_iters per Chinchilla
-min_lr = 5e-6 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+min_lr = 8e-6 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
@@ -79,8 +80,10 @@ else:
     id2label = config.outputs
 
 
-train_dataloader = get_dataloader(current_data_dirs, batch_size, train_split, True, classifier_type, sequence_len, sequence_stride, flip_prob, shuffle=True)
-val_dataloader = get_dataloader(current_data_dirs, batch_size, train_split, False, classifier_type, sequence_len, sequence_stride, flip_prob, shuffle=True)
+train_dataloader = get_dataloader(current_data_dirs, batch_size, train_split, True,
+                                  classifier_type, sequence_len, sequence_stride, flip_prob, warp_prob, shuffle=True)
+val_dataloader = get_dataloader(current_data_dirs, batch_size, train_split, False,
+                                classifier_type, sequence_len, sequence_stride, flip_prob, warp_prob, shuffle=True)
 
 
 iter_num = 0
@@ -132,7 +135,7 @@ def load_model(sample_only=False):
     for name, param in model.named_parameters():
         if name.startswith("dinov2"):
             param.requires_grad = fine_tune
-        if sequence_len > 1 and freeze_non_dino_cnn and "classifier" in name and "layer_norm" not in name:
+        if sequence_len > 1 and freeze_non_dino_layers and "classifier" in name and "layer_norm" not in name:
             param.requires_grad = False
             print(f"Freezing {name}")
         # maybe also freeze layernorm no matter what here
