@@ -13,13 +13,7 @@ from training_new import load_model
 from dataloader import val_transform
 import torch
 
-threshold_turn = 0
-t_time = 0.05
-
-
-def sleep_and_release(key, t_time=t_time):
-    time.sleep(t_time)
-    ReleaseKey(key)
+t_time = 0.05   # keep this in case i want a max turn later
 
 
 def press_and_release(key, t_time=t_time):
@@ -35,159 +29,54 @@ def release_all():
     ReleaseKey(D)
 
 
-def forward():
-    PressKey(W)
-    ReleaseKey(A)
-    ReleaseKey(S)
-    ReleaseKey(D)
-
-
-def right(short_press):
-    PressKey(D)
-    ReleaseKey(A)
-    ReleaseKey(S)
-    ReleaseKey(W)
-    if short_press:
-        t1 = Worker(target=sleep_and_release, args=(D,))
-        t1.start()
-
-
-def left(short_press):
-    PressKey(A)
-    ReleaseKey(W)
-    ReleaseKey(S)
-    ReleaseKey(D)
-    if short_press:
-        t1 = Worker(target=sleep_and_release, args=(A,))
-        t1.start()
-
-
-def backwards():
-    PressKey(S)
-    ReleaseKey(A)
-    ReleaseKey(W)
-    ReleaseKey(D)
-
-
-def forward_left(short_press):
-    PressKey(W)
-    PressKey(A)
-    ReleaseKey(S)
-    ReleaseKey(D)
-    if short_press:
-        t1 = Worker(target=sleep_and_release, args=(A,))
-        t1.start()
-
-
-def forward_right(short_press):
-    PressKey(W)
-    PressKey(D)
-    ReleaseKey(A)
-    ReleaseKey(S)
-    if short_press:
-        t1 = Worker(target=sleep_and_release, args=(D,))
-        t1.start()
-
-
-def output_key(prediction):
-    # index_list = [1, 3, 4, 5]
-    max_idx = np.argmax(prediction)
-    output = ""
-    previous_output_size = 7
-    short_press = False
-    if max_idx >= previous_output_size:
-        short_press = True
-        if max_idx == previous_output_size:
-            max_idx -= 6
-        else:
-            max_idx -= 5
-
-    if prediction[max_idx] > threshold_turn:
-        if max_idx == config.outputs["a"]:
-            left(short_press)
-            output = "a" if not short_press else "short a"
-        elif max_idx == config.outputs["wa"]:
-            forward_left(short_press)
-            output = "wa" if not short_press else "short wa"
-        elif max_idx == config.outputs["wd"]:
-            forward_right(short_press)
-            output = "wd" if not short_press else "short wd"
-        elif max_idx == config.outputs["s"]:
-            backwards()
-            output = "s"
-        elif max_idx == config.outputs["d"]:
-            right(short_press)
-            output = "d" if not short_press else "short d"
-        elif max_idx == config.outputs["w"]:
-            forward()
-            output = "w"
-        elif max_idx == config.outputs["nothing"]:
-            release_all()
-            output = "nothing"
-        else:
-            print("error big time")
-    else:
-        forward()
-        output = "w"
-    pred_value = prediction[max_idx] if not short_press else prediction[max_idx + 6] if max_idx == 1 else prediction[
-        max_idx + 5]
-    print("Prediction:", output, "Value", pred_value)
-
-
-def simple_output_key(prediction):
+# this works so well that I deleted everything else, the other ones should legit not be used, this is that good
+def proportional_output_key(prediction, t_since_last_press):
+    """
+    Using proportional values for the steering (left, right) works insanely well.
+    Gas and break not bad for reasons (tapping makes the car slow)...
+    So instead we make them binary because that works really well.
+    """
     press_keys = True
     output_dict = {"w": 0, "a": 1, "s": 2, "d": 3}
-    prediction = prediction.cpu().detach().numpy()
-    thresholds = np.array([0.5, 0.5, 0.5, 0.5])     # w a s d
-    result = (prediction >= thresholds).astype(int).squeeze()
+    min_val_steer = 0.03  # 0 - 1
+    speed_threshold = 0.5  # 0 - 1
+    prediction = prediction.cpu().detach().numpy().squeeze()
+    # do this before thresholding to get the true values
+    prediction = handle_opposite_keys(prediction, output_dict)
+
+    press_durations = np.where(prediction < min_val_steer, 0, prediction)
+    # Binary thresholding for speed keys (W, S): either 0 or 1
+    press_durations[[output_dict['w'], output_dict['s']]] = np.where(
+        prediction[[output_dict['w'], output_dict['s']]] >= speed_threshold, 1, 0)
+    # don't care about speed key values because we just want to press or not press
+    press_durations *= t_since_last_press
 
     if press_keys:
-        for key, value in output_dict.items():
-            if result[value] == 1:
-                PressKey(key)
-                if key in "ad":
-                    worker = Worker(target=sleep_and_release, args=(key,))
+        # Iterate over the keys and their corresponding durations
+        for key, duration in zip([W, A, S, D], press_durations):
+            if duration > 0:
+                if key in [A, D]:  # Steering keys
+                    worker = Worker(target=press_and_release, args=(key, float(duration)))
                     worker.start()
+                else:  # Speed keys
+                    PressKey(key)
             else:
                 ReleaseKey(key)
 
-    if np.sum(result) == 0:
-        print("nothing pressed, max val was:", prediction.max())
-    else:
-        print(",".join([key + "-" + prediction[value] for key, value in output_dict.items() if result[value] == 1]))
-
-
-def proportional_output_key(prediction, fps):
-    output_dict = {"w": 0, "a": 1, "s": 2, "d": 3}
-    min_val = 0.001
-    prediction = prediction.cpu().detach().numpy().squeeze()
-    # do this before thresholding to get the true values
-    prediction = handle_opposite_keys(prediction, 1)
-    prediction = handle_opposite_keys(prediction, 0)
-    # Normalize predictions to a reasonable key press duration (e.g., 0 to time to next prediction)
-    press_durations = prediction / fps
-    press_durations_thresholded = np.where(press_durations < min_val, 0, press_durations)
-
-    # Press and release keys based on the prediction values using sleep_and_release
-    for key, duration in zip([W, A, S, D], press_durations_thresholded):
-        if duration > 0:
-            worker = Worker(target=press_and_release, args=(key, duration))
-            worker.start()
-
-    if np.sum(press_durations_thresholded) == 0:
+    if np.sum(press_durations) == 0:
         print("Nothing pressed, max val was:", prediction.max())
     else:
-        pressed_keys = [key + "-" + str(press_durations_thresholded[value]) for key, value in output_dict.items() if press_durations_thresholded[value] > 0]
+        pressed_keys = [key + "-" + str(prediction[value]) for key, value in output_dict.items() if press_durations[value] > 0]
         print("Keys pressed:", ", ".join(pressed_keys))
 
 
-def handle_opposite_keys(prediction, idx):
-    if prediction[idx] > prediction[idx + 2]:
-        prediction[idx] -= prediction[idx + 2]
-        prediction[idx + 2] = 0
+def handle_opposite_keys(prediction, output_dict):
+    if prediction[output_dict["a"]] > prediction[output_dict["d"]]:
+        prediction[output_dict["a"]] -= prediction[output_dict["d"]]
+        prediction[output_dict["d"]] = 0
     else:
-        prediction[idx + 2] -= prediction[idx]
-        prediction[idx] = 0
+        prediction[output_dict["d"]] -= prediction[output_dict["a"]]
+        prediction[output_dict["a"]] = 0
     return prediction
 
 
@@ -212,18 +101,21 @@ def main_with_cnn():
     global t_time
     model = load_model(sample_only=True)
     sct = mss.mss()
-    max_t_time = 1.0 / utils.get_fps_ratio()
     counter = 0
     t = time.time()
+    t_since_last_press = time.time()
     while True:
         counter += 1
         img = get_screencap_img(sct)
         img = val_transform(image=img)["image"]
         img = img[None, ...]
         img = img.pin_memory().to("cuda")
+
         prediction, _ = model(img)
         prediction = torch.nn.functional.sigmoid(prediction)
-        simple_output_key(prediction)
+
+        proportional_output_key(prediction, t_since_last_press)
+        t_since_last_press = time.time()
         key = key_check()
         if (time.time() - t) >= 1:
             print("fps:", counter)
@@ -239,7 +131,7 @@ def main_with_cnn():
             t_time = max(0.01, t_time - 0.01)
             print(t_time)
         if "B" in key:
-            t_time = min(max_t_time, t_time + 0.01)
+            t_time += 0.01
             print(t_time)
 
 
@@ -247,8 +139,8 @@ def main_with_lstm():
     global t_time
     model = load_model(sample_only=True)
     sct = mss.mss()
-    max_t_time = 1.0 / utils.get_fps_ratio()
     t = time.time()
+    last_press_time = time.time()
     counter = 0
     # Use a deque to store timestamped images
     max_stored_images = 20  # Adjust this value based on your memory constraints
@@ -267,10 +159,14 @@ def main_with_lstm():
         img_tensor = torch.stack(selected_images, dim=0)   # first timedim, then batch
         img_tensor = img_tensor[None, ...]
         img_tensor = img_tensor.pin_memory().to("cuda")
+
         prediction, _ = model(img_tensor)
         prediction = torch.nn.functional.sigmoid(prediction)
-        simple_output_key(prediction)
+
+        proportional_output_key(prediction, time.time() - last_press_time)
+        last_press_time = time.time()
         key = key_check()
+
         if (time.time() - t) >= 1:
             print("fps:", counter)
             counter = 0
@@ -279,13 +175,14 @@ def main_with_lstm():
             release_all()
             break
         if "N" in key:
+            image_buffer.clear()
             release_all()
             time.sleep(5)
         if "X" in key:
             t_time = max(0.01, t_time - 0.01)
             print(t_time)
         if "B" in key:
-            t_time = min(max_t_time, t_time + 0.01)
+            t_time += 0.01
             print(t_time)
 
 
