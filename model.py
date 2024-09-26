@@ -39,7 +39,7 @@ class Dinov2ForClassification(torch.nn.Module):
         self.dinov2_config = Dinov2Config.from_pretrained(f"facebook/dinov2-{size}")
         self.dinov2_config.attention_module = "xformers"
         self.dinov2 = Dinov2Model.from_pretrained(f"facebook/dinov2-{size}", config=self.dinov2_config)
-        self.classifier = TransferNetwork(self.dinov2_config.hidden_size, 18, 13, num_classes)
+        self.classifier = self.get_classifier()
         self.classifier_type = classifier_type
         if self.classifier_type == "bce":
             self.loss_fct = torch.nn.BCEWithLogitsLoss()
@@ -59,6 +59,9 @@ class Dinov2ForClassification(torch.nn.Module):
             loss = self.loss_fct(logits, labels)
 
         return logits, loss
+
+    def get_classifier(self):
+        return TransferNetwork(self.dinov2_config.hidden_size, 18, 13, self.num_classes)
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
         # start with all of the candidate parameters
@@ -100,30 +103,29 @@ class TransferNetworkRNN(TransferNetwork):
 
 class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
     def __init__(self, size, num_classes, classifier_type):
+        """
+        After lots of confusion, pytorch stateless lstm is the default, and h_0 and c_0 are initialized to 0
+        at the start of each SEQUENCE. There seems to be a lot of confusion on the internet likely from
+        people calling sequences "batches" (which is a very big difference in this case).
+        I was confused because if it was batches, you would have to
+        preserve sample order in a batch and sample sequentially inside of a batch. But pytorch docs (for me) clears
+        this up, because the h_0 and c_0 tensors are (D∗num_layers,N,Hout). Because we have N as a dim here that means
+        that it's zero for each sequence.
+        My initial investigation came from the fact that the loss function would dip (good, but weird) after each time
+        the dataset would "end" and the next iter(dataloader) would be called. I thought this would cause some
+        lstm hidden state contamination, but this doesn't seem to be the issue as the lstm is stateless here.
+
+        Update: I think the loss issue comes from the dataset sampler. Apparently I thought that by default
+        replacement should be True, which means that a sample can be drawn multiple times
+        (and the len param of the dataset is "artificial"). This is not the case.
+        By default it is False, so each dataloader actually goes through the entire dataset once.
+        The loss jump is just normal epoch behavior then.
+        https://pytorch.org/docs/stable/generated/torch.nn.LSTM.html
+        """
         super().__init__(size, num_classes, classifier_type)
-        self.classifier = TransferNetworkRNN(self.dinov2_config.hidden_size, 18, 13)
-
-        # LSTM layer
         self.rnn_hidden_size = 128
-        # after lots of confusion, pytorch stateless lstm is the default, and h_0 and c_0 are initialized to 0
-        # at the start of each SEQUENCE. There seems to be a lot of confusion on the internet likely from
-        # people calling sequences "batches" (which is a very big difference in this case).
-        # I was confused because if it was batches, you would have to
-        # preserve sample order in a batch and sample sequentially inside of a batch. But pytorch docs (for me) clears
-        # this up, because the h_0 and c_0 tensors are (D∗num_layers,N,Hout). Because we have N as a dim here that means
-        # that it's zero for each sequence.
-        # My initial investigation came from the fact that the loss function would dip (good, but weird) after each time
-        # the dataset would "end" and the next iter(dataloader) would be called. I thought this would cause some
-        # lstm hidden state contamination, but this doesn't seem to be the issue as the lstm is stateless here.
-
-        # Update: I think the loss issue comes from the dataset sampler. Apparently I thought that by default
-        # replacement should be True, which means that a sample can be drawn multiple times
-        # (and the len param of the dataset is "artificial"). This is not the case.
-        # By default it is False, so each dataloader actually goes through the entire dataset once.
-        # The loss jump is just normal epoch behavior then.
-        # https://pytorch.org/docs/stable/generated/torch.nn.LSTM.html
         self.rnn = torch.nn.LSTM(
-            input_size=self.classifier.feature_size,  # Features + previous labels
+            input_size=self.classifier.feature_size,
             hidden_size=self.rnn_hidden_size,
             num_layers=1,
             batch_first=True,
@@ -136,18 +138,13 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
         batch_size, time_steps, channels, height, width = pixel_values.shape
 
         # Process each time step
-        features = []
-        for t in range(time_steps):
-            outputs = self.dinov2(pixel_values[:, t])
-            patch_embeddings = outputs.last_hidden_state[:, 1:, :]  # remove cls token
-            features.append(self.classifier(patch_embeddings))
+        features = [self.classifier(self.dinov2(pixel_values[:, t]).last_hidden_state[:, 1:, :]) for t in range(time_steps)]
 
         # Stack features from all time steps
         features = torch.stack(features, dim=1)  # Shape: (batch_size, time_steps, feature_size)
         rnn_out, _ = self.rnn(features)
         rnn_last_output = rnn_out[:, -1, :]
 
-        # Final classification
         logits = self.final_linear_layer(self.layer_norm_3(rnn_last_output))
 
         loss = None
@@ -156,3 +153,6 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
             loss = self.loss_fct(logits.view(-1, self.num_classes), last_label.view(-1, self.num_classes))
 
         return logits, loss
+
+    def get_classifier(self):
+        return TransferNetworkRNN(self.dinov2_config.hidden_size, 18, 13)
