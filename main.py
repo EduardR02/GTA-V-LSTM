@@ -1,10 +1,8 @@
 from collections import deque
-
 import numpy as np
 import mss
 import cv2
 import time
-import utils
 from keys import PressKey, ReleaseKey, W, A, S, D
 import config
 from grabkeys import key_check
@@ -12,8 +10,18 @@ from threading import Thread as Worker
 from training_new import load_model
 from dataloader import val_transform
 import torch
+import psutil
+import os
+
+
+# Get the current process
+process = psutil.Process(os.getpid())
+# Set the priority to "High Priority" class
+process.nice(psutil.HIGH_PRIORITY_CLASS)
+
 
 t_time = 0.05   # keep this in case i want a max turn later
+output_dict = {"w": 0, "a": 1, "s": 2, "d": 3}
 
 
 def press_and_release(key, t_time=t_time):
@@ -37,10 +45,10 @@ def proportional_output_key(prediction, t_since_last_press):
     So instead we make them binary because that works really well.
     """
     press_keys = True
-    output_dict = {"w": 0, "a": 1, "s": 2, "d": 3}
+    log_presses = False
     min_val_steer = 0.03  # 0 - 1
     speed_threshold = 0.5  # 0 - 1
-    prediction = prediction.cpu().detach().numpy().squeeze()
+    prediction = prediction.numpy().squeeze()
     # do this before thresholding to get the true values
     prediction = handle_opposite_keys(prediction, output_dict)
 
@@ -50,24 +58,23 @@ def proportional_output_key(prediction, t_since_last_press):
         prediction[[output_dict['w'], output_dict['s']]] >= speed_threshold, 1, 0)
     # don't care about speed key values because we just want to press or not press
     press_durations *= t_since_last_press
-
     if press_keys:
         # Iterate over the keys and their corresponding durations
         for key, duration in zip([W, A, S, D], press_durations):
             if duration > 0:
                 if key in [A, D]:  # Steering keys
                     worker = Worker(target=press_and_release, args=(key, float(duration)))
-                    worker.start()
                 else:  # Speed keys
-                    PressKey(key)
+                    worker = Worker(target=PressKey, args=(key,))
             else:
-                ReleaseKey(key)
-
-    if np.sum(press_durations) == 0:
-        print("Nothing pressed, max val was:", prediction.max())
-    else:
-        pressed_keys = [key + "-" + str(prediction[value]) for key, value in output_dict.items() if press_durations[value] > 0]
-        print("Keys pressed:", ", ".join(pressed_keys))
+                worker = Worker(target=ReleaseKey, args=(key,))
+            worker.start()
+    if log_presses:
+        if np.sum(press_durations) == 0:
+            print("Nothing pressed, max val was:", prediction.max())
+        else:
+            pressed_keys = [key + "-" + str(prediction[value]) for key, value in output_dict.items() if press_durations[value] > 0]
+            print("Keys pressed:", ", ".join(pressed_keys))
 
 
 def handle_opposite_keys(prediction, output_dict):
@@ -97,6 +104,7 @@ def show_screen():
             break
 
 
+@torch.no_grad()
 def main_with_cnn():
     global t_time
     model = load_model(sample_only=True)
@@ -135,6 +143,7 @@ def main_with_cnn():
             print(t_time)
 
 
+@torch.no_grad()
 def main_with_lstm():
     global t_time
     model = load_model(sample_only=True)
@@ -151,18 +160,15 @@ def main_with_lstm():
         counter += 1
         current_time = time.time()
         img = get_screencap_img(sct)
-        img = val_transform(image=img)["image"]
 
         image_buffer.append((current_time, img))    # timestamp for selecting images with best stride
         selected_images = select_images(image_buffer, desired_interval, config.sequence_len)
 
-        img_tensor = torch.stack(selected_images, dim=0)   # first timedim, then batch
-        img_tensor = img_tensor[None, ...]
+        img_tensor = torch.stack([val_transform(image=img)["image"] for img in selected_images], dim=0)   # first timedim, then batch
+        img_tensor = img_tensor[None, ...]  # add dummy batch dim
         img_tensor = img_tensor.pin_memory().to("cuda")
-
         prediction, _ = model(img_tensor)
-        prediction = torch.nn.functional.sigmoid(prediction)
-
+        prediction = torch.nn.functional.sigmoid(prediction.cpu())
         proportional_output_key(prediction, time.time() - last_press_time)
         last_press_time = time.time()
         key = key_check()

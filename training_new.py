@@ -115,6 +115,8 @@ def load_model(sample_only=False):
 
     if sample_only:
         model.eval()
+        for module in model.modules():
+            module.eval()
         model.to(device)
         del checkpoint
         torch.cuda.empty_cache()
