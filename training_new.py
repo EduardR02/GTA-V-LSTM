@@ -8,16 +8,21 @@ from model import Dinov2ForClassification, Dinov2ForTimeSeriesClassification
 import matplotlib.pyplot as plt
 import math
 import time
+import psutil
 
-current_data_dirs = [config.stuck_data_dir_name, config.new_data_dir_name]  # has to be list
 
+current_data_dirs = [config.stuck_data_dir_name, config.turns_data_dir_name, config.new_data_dir_name]  # has to be list
 
+# Get the current process
+process = psutil.Process(os.getpid())
+# Set the priority to "High Priority" class
+process.nice(psutil.HIGH_PRIORITY_CLASS)
 print(torch.backends.cudnn.version())
 print(torch.version.cuda)
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
-out_dir = os.path.join('models', 'lstm')
+out_dir = os.path.join('models', 'cls')
 eval_interval = 300
 log_interval = 1
 eval_iters = 10
@@ -25,23 +30,25 @@ eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 fine_tune = False   # train the entire model or just the top
 freeze_non_dino_layers = False
-init_from = 'resume' # 'scratch' or 'resume'
+init_from = 'scratch' # 'scratch' or 'resume'
 dino_size = "base"
 load_checkpoint_name = "ckpt.pt"
 save_checkpoint_name = "ckpt.pt"
-metrics_name = "metrics_plot_with_warp_and_flip_2.png"
+metrics_name = "metrics_cls.png"
 gradient_accumulation_steps = 1 # used to simulate larger batch sizes
 batch_size = 128    # if gradient_accumulation_steps > 1, this is the micro-batch size
 train_split = 0.95   # test val split, keep same for resume
 convert_to_greyscale = False
-sequence_len = 2
+sequence_len = 3
 sequence_stride = 20
-flip_prob = 0.2
-warp_prob = 0.2
+flip_prob = 0.0
+warp_prob = 0.3
 classifier_type = "bce" # "cce" or "bce"
+restart_schedules = False
+cls_only = True    # if to use the patch embeddings or just the cls token
 
 # adamw optimizer
-learning_rate = 3e-4 # max learning rate
+learning_rate = 2e-4 # max learning rate
 max_iters = 60000 # total number of training iterations
 # optimizer settings
 weight_decay = 5e-2
@@ -100,12 +107,12 @@ def load_model(sample_only=False):
         dino_model = Dinov2ForClassification
     if init_from == 'scratch':
         print("Initializing a new model from scratch")
-        model = dino_model(dino_size, len(id2label), classifier_type=classifier_type)
+        model = dino_model(dino_size, len(id2label), classifier_type=classifier_type, cls_only=cls_only)
     elif init_from == 'resume':
         print(f"Resuming training from {out_dir}")
         ckpt_path = os.path.join(out_dir, load_checkpoint_name)
         checkpoint = torch.load(ckpt_path, map_location=device)
-        model = dino_model(dino_size, len(id2label), classifier_type=classifier_type)
+        model = dino_model(dino_size, len(id2label), classifier_type=classifier_type, cls_only=cls_only)
         state_dict = checkpoint['model']
         model.load_state_dict(state_dict, strict=False)
         iter_num = checkpoint['iter_num']
@@ -155,7 +162,8 @@ def load_model(sample_only=False):
         # https://discuss.pytorch.org/t/gpu-memory-usage-increases-by-90-after-torch-load/9213/3
         del checkpoint  # dereference seems crucial
         torch.cuda.empty_cache()
-
+    if restart_schedules:
+        iter_num = 0
     # compile the model
     if compile:
         print("compiling the model... (takes a ~minute)")
@@ -294,6 +302,8 @@ def train_loop():
     t0 = time.time()
     local_iter_num = 0 # number of iterations in the lifetime of this process
     metrics_dict = {"losses": [], "val_losses": [], "val_loss_iters": [], "accuracy": [], "val_accs": [], "train_accs": []}
+    print("Total train samples:", len(train_dataloader.dataset))
+    print("Total val samples:", len(val_dataloader.dataset))
     model = load_model()
     dataloader_iter = iter(train_dataloader)
     X, Y, Y_CPU, dataloader_iter = get_batch(dataloader_iter, 'train')
