@@ -47,14 +47,15 @@ class H5Dataset(Dataset):
         # this is dumb but I don't want to make a new function in the child class
         seq_len = 1 if not hasattr(self, 'sequence_len') else self.sequence_len
         seq_stride = 0 if not hasattr(self, 'sequence_stride') else self.sequence_stride
+        effective_sequence_length = (seq_len - 1) * seq_stride + self.label_shift
         for file_path in self.data_files:
             with h5py.File(file_path, 'r') as f:
                 file_samples = f['labels'].shape[0]
-                file_samples -= (seq_len - 1) * seq_stride + self.label_shift
+                file_samples -= effective_sequence_length
                 if "stuck" in file_path:
                     # this is a bit confusing, but we only have to account for the shorter than amt_remove_after_pause
                     # case (otherwise -0), because we handle the case if it's longer with the sequence_len > 1 case
-                    file_samples -= max(config.amt_remove_after_pause - ((seq_len - 1) * seq_stride) - self.label_shift, 0)
+                    file_samples -= max(config.amt_remove_after_pause - effective_sequence_length, 0)
                 if file_samples <= 0:
                     print(f"Skipping and removing {file_path} as it has {file_samples} samples (no valid samples)")
                     self.data_files.remove(file_path)
@@ -157,14 +158,9 @@ class TimeSeriesDataset(H5Dataset):
         local_idx = idx - (self.lookup_table[file_idx - 1] if file_idx > 0 else 0)
 
         file_path = self.data_files[file_idx]
-        total_valid_frames = self.lookup_table[file_idx] - (self.lookup_table[file_idx - 1] if file_idx > 0 else 0)
         sequence_range = (self.sequence_len - 1) * self.sequence_stride
-
-        if local_idx + sequence_range >= total_valid_frames:
-            # Adjust local_idx to get a valid sequence
-            local_idx = total_valid_frames - sequence_range
         if "stuck" in file_path:
-            local_idx += max(config.amt_remove_after_pause - sequence_range, 0)
+            local_idx += max(config.amt_remove_after_pause - sequence_range - self.label_shift, 0)
         with h5py.File(file_path, 'r') as f:
             # Get sequence with stride
             img_indices = range(local_idx, local_idx + self.sequence_len * self.sequence_stride, self.sequence_stride)
@@ -302,7 +298,7 @@ def invNormalize(x):
 
 
 def test_dataloader():
-    data_dirs = ['data/stuck']
+    data_dirs = ['data/turns']
     sequence_len = 2
     train_loader = get_dataloader(data_dirs, 1024, 0.95, True, "bce", sequence_len, 40, 1, 1, True)
     # vizualize data with matplotlib until stopped
