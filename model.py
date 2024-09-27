@@ -32,7 +32,7 @@ class TransferNetwork(torch.nn.Module):
 
 
 class Dinov2ForClassification(torch.nn.Module):
-    def __init__(self, size, num_classes, classifier_type):
+    def __init__(self, size, num_classes, classifier_type, cls_only=False):
         super().__init__()
         self.size = size
         self.num_classes = num_classes
@@ -102,7 +102,7 @@ class TransferNetworkRNN(TransferNetwork):
 
 
 class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
-    def __init__(self, size, num_classes, classifier_type):
+    def __init__(self, size, num_classes, classifier_type, cls_only=False):
         """
         After lots of confusion, pytorch stateless lstm is the default, and h_0 and c_0 are initialized to 0
         at the start of each SEQUENCE. There seems to be a lot of confusion on the internet likely from
@@ -123,9 +123,12 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
         https://pytorch.org/docs/stable/generated/torch.nn.LSTM.html
         """
         super().__init__(size, num_classes, classifier_type)
-        self.rnn_hidden_size = 128
+        self.cls_only = cls_only
+        if cls_only: del self.classifier
+        self.rnn_hidden_size = 256
+        input_size = self.dinov2_config.hidden_size if cls_only else self.classifier.feature_size
         self.rnn = torch.nn.LSTM(
-            input_size=self.classifier.feature_size,
+            input_size=input_size,
             hidden_size=self.rnn_hidden_size,
             num_layers=1,
             batch_first=True,
@@ -138,7 +141,10 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
         batch_size, time_steps, channels, height, width = pixel_values.shape
 
         # Process each time step
-        features = [self.classifier(self.dinov2(pixel_values[:, t]).last_hidden_state[:, 1:, :]) for t in range(time_steps)]
+        if self.cls_only:
+            features = [self.dinov2(pixel_values[:, t]).last_hidden_state[:, 0, :] for t in range(time_steps)]
+        else:
+            features = [self.classifier(self.dinov2(pixel_values[:, t]).last_hidden_state[:, 1:, :]) for t in range(time_steps)]
 
         # Stack features from all time steps
         features = torch.stack(features, dim=1)  # Shape: (batch_size, time_steps, feature_size)
