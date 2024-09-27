@@ -2,7 +2,7 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
-from torch import stack, uint8
+from torch import stack
 import h5py
 import os
 import bisect
@@ -30,12 +30,13 @@ max_warp_shift = 100
 
 
 class H5Dataset(Dataset):
-    def __init__(self, data_dirs, train_split, is_train, classifier_type, flip_prob, warp_prob):
+    def __init__(self, data_dirs, train_split, is_train, classifier_type, flip_prob, warp_prob, shift_labels=True):
         self.train_split = train_split
         self.is_train = is_train
         self.classifier_type = classifier_type
         self.flip_prob = flip_prob
         self.warp_prob = warp_prob
+        self.label_shift = round(config.fps_at_recording_time / config.fps_at_test_time) if shift_labels else 0
         self.transform = train_transform if is_train else val_transform
         self.data_files = [os.path.join(data_dir, f) for data_dir in data_dirs for f in sorted(os.listdir(data_dir)) if f.endswith('.h5')]
         self.lookup_table = self._create_lookup_table()
@@ -49,12 +50,11 @@ class H5Dataset(Dataset):
         for file_path in self.data_files:
             with h5py.File(file_path, 'r') as f:
                 file_samples = f['labels'].shape[0]
-                if seq_len > 1:
-                    file_samples -= (seq_len - 1) * seq_stride
+                file_samples -= (seq_len - 1) * seq_stride + self.label_shift
                 if "stuck" in file_path:
                     # this is a bit confusing, but we only have to account for the shorter than amt_remove_after_pause
                     # case (otherwise -0), because we handle the case if it's longer with the sequence_len > 1 case
-                    file_samples -= max(config.amt_remove_after_pause - ((seq_len - 1) * seq_stride), 0)
+                    file_samples -= max(config.amt_remove_after_pause - ((seq_len - 1) * seq_stride) - self.label_shift, 0)
                 if file_samples <= 0:
                     print(f"Skipping and removing {file_path} as it has {file_samples} samples (no valid samples)")
                     self.data_files.remove(file_path)
@@ -81,11 +81,11 @@ class H5Dataset(Dataset):
         file_path = self.data_files[file_idx]
 
         if "stuck" in file_path:
-            local_idx += config.amt_remove_after_pause
+            local_idx += config.amt_remove_after_pause - self.label_shift
 
         with h5py.File(file_path, 'r') as f:
             image = f['images'][local_idx]
-            label = f['labels'][local_idx]
+            label = f['labels'][local_idx + self.label_shift]
             if self.classifier_type == "bce":
                 label = label.astype(np.int8).flatten()
                 label = self._to_wasd(label)
@@ -144,10 +144,10 @@ class H5Dataset(Dataset):
 
 
 class TimeSeriesDataset(H5Dataset):
-    def __init__(self, data_dirs, train_split, is_train, classifier_type, flip_prob, warp_prob, sequence_len, sequence_stride):
+    def __init__(self, data_dirs, train_split, is_train, classifier_type, flip_prob, warp_prob, sequence_len, sequence_stride, shift_labels=True):
         self.sequence_len = sequence_len
         self.sequence_stride = sequence_stride
-        super().__init__(data_dirs, train_split, is_train, classifier_type, flip_prob, warp_prob)
+        super().__init__(data_dirs, train_split, is_train, classifier_type, flip_prob, warp_prob, shift_labels)
 
     def __getitem__(self, idx):
         if not self.is_train:
@@ -167,9 +167,10 @@ class TimeSeriesDataset(H5Dataset):
             local_idx += max(config.amt_remove_after_pause - sequence_range, 0)
         with h5py.File(file_path, 'r') as f:
             # Get sequence with stride
-            indices = range(local_idx, local_idx + self.sequence_len * self.sequence_stride, self.sequence_stride)
-            images = f['images'][indices]
-            labels = f['labels'][indices]
+            img_indices = range(local_idx, local_idx + self.sequence_len * self.sequence_stride, self.sequence_stride)
+            label_indices = range(local_idx + self.label_shift, local_idx + self.label_shift + self.sequence_len * self.sequence_stride, self.sequence_stride)
+            images = f['images'][img_indices]
+            labels = f['labels'][label_indices]
         if self.classifier_type == "bce":
             labels = self._to_wasd(labels.astype(np.int8))
         else:
@@ -279,11 +280,11 @@ val_transform = A.Compose([
 ])
 
 
-def get_dataloader(data_dir, batch_size, train_split, is_train, classifier_type, sequence_len=1, sequence_stride=1, flip_prob=0., warp_prob=0., shuffle=True):
+def get_dataloader(data_dir, batch_size, train_split, is_train, classifier_type, sequence_len=1, sequence_stride=1, flip_prob=0., warp_prob=0., shift_labels=True, shuffle=True):
     if sequence_len > 1:
-        dataset = TimeSeriesDataset(data_dir, train_split, is_train, classifier_type, flip_prob, warp_prob, sequence_len, sequence_stride)
+        dataset = TimeSeriesDataset(data_dir, train_split, is_train, classifier_type, flip_prob, warp_prob, sequence_len, sequence_stride, shift_labels)
     else:
-        dataset = H5Dataset(data_dir, train_split, is_train, classifier_type, flip_prob, warp_prob)
+        dataset = H5Dataset(data_dir, train_split, is_train, classifier_type, flip_prob, warp_prob, shift_labels)
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -301,9 +302,9 @@ def invNormalize(x):
 
 
 def test_dataloader():
-    data_dirs = ['data/turns']
+    data_dirs = ['data/stuck']
     sequence_len = 2
-    train_loader = get_dataloader(data_dirs, 32, 0.95, True, "bce", sequence_len, 40, 1, 1)
+    train_loader = get_dataloader(data_dirs, 1024, 0.95, True, "bce", sequence_len, 40, 1, 1, True)
     # vizualize data with matplotlib until stopped
     for data, label in train_loader:
         for i in range(data.shape[0]):
