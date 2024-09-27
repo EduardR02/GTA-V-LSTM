@@ -9,6 +9,7 @@ class TransferNetwork(torch.nn.Module):
         self.in_channels = in_channels
         self.width = tokenW
         self.height = tokenH
+        self.layer_norm_0 = torch.nn.LayerNorm([in_channels, self.height, self.width])
         self.classifier_h1 = torch.nn.Conv2d(in_channels, 32, (5, 5), padding=2)
         self.layer_norm_1 = torch.nn.LayerNorm([32, self.height, self.width])
         self.classifier_h2 = torch.nn.Conv2d(32, 16, (5, 5), padding=2)
@@ -19,6 +20,7 @@ class TransferNetwork(torch.nn.Module):
     def forward(self, embeddings):
         embeddings = embeddings.reshape(-1, self.height, self.width, self.in_channels)
         embeddings = embeddings.permute(0, 3, 1, 2)
+        embeddings = self.layer_norm_0(embeddings)
         embeddings = torch.nn.functional.relu(self.classifier_h1(embeddings))
         embeddings = self.layer_norm_1(embeddings)
         embeddings = torch.nn.functional.relu(self.classifier_h2(embeddings))
@@ -32,7 +34,7 @@ class TransferNetwork(torch.nn.Module):
 
 
 class Dinov2ForClassification(torch.nn.Module):
-    def __init__(self, size, num_classes, classifier_type, cls_only=False):
+    def __init__(self, size, num_classes, classifier_type, cls_option="both"):
         super().__init__()
         self.size = size
         self.num_classes = num_classes
@@ -102,7 +104,7 @@ class TransferNetworkRNN(TransferNetwork):
 
 
 class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
-    def __init__(self, size, num_classes, classifier_type, cls_only=False):
+    def __init__(self, size, num_classes, classifier_type, cls_option="both"):
         """
         After lots of confusion, pytorch stateless lstm is the default, and h_0 and c_0 are initialized to 0
         at the start of each SEQUENCE. There seems to be a lot of confusion on the internet likely from
@@ -123,10 +125,15 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
         https://pytorch.org/docs/stable/generated/torch.nn.LSTM.html
         """
         super().__init__(size, num_classes, classifier_type)
-        self.cls_only = cls_only
-        if cls_only: del self.classifier
-        self.rnn_hidden_size = 256
-        input_size = self.dinov2_config.hidden_size if cls_only else self.classifier.feature_size
+        self.cls_option = cls_option
+        if cls_option == "cls_only": del self.classifier
+        self.rnn_hidden_size = 64
+        if cls_option == "cls_only":
+            input_size = self.dinov2_config.hidden_size
+        elif cls_option == "patches_only":
+            input_size = self.classifier.feature_size
+        elif cls_option == "both":
+            input_size = self.dinov2_config.hidden_size + self.classifier.feature_size
         self.rnn = torch.nn.LSTM(
             input_size=input_size,
             hidden_size=self.rnn_hidden_size,
@@ -141,10 +148,17 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
         batch_size, time_steps, channels, height, width = pixel_values.shape
 
         # Process each time step
-        if self.cls_only:
+        if self.cls_option == "cls_only":
             features = [self.dinov2(pixel_values[:, t]).last_hidden_state[:, 0, :] for t in range(time_steps)]
-        else:
+        elif self.cls_option == "patches_only":
             features = [self.classifier(self.dinov2(pixel_values[:, t]).last_hidden_state[:, 1:, :]) for t in range(time_steps)]
+        else:
+            features = []
+            for t in range(time_steps):
+                output = self.dinov2(pixel_values[:, t])
+                classifier_out = self.classifier(output.last_hidden_state[:, 1:, :])
+                cls = output.last_hidden_state[:, 0, :]
+                features.append(torch.cat((classifier_out, cls), dim=1))
 
         # Stack features from all time steps
         features = torch.stack(features, dim=1)  # Shape: (batch_size, time_steps, feature_size)

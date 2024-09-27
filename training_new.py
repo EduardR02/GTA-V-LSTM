@@ -22,7 +22,7 @@ print(torch.version.cuda)
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
-out_dir = os.path.join('models', 'cls')
+out_dir = os.path.join('models', 'lstm_label_shift')
 eval_interval = 300
 log_interval = 1
 eval_iters = 10
@@ -34,18 +34,19 @@ init_from = 'scratch' # 'scratch' or 'resume'
 dino_size = "base"
 load_checkpoint_name = "ckpt.pt"
 save_checkpoint_name = "ckpt.pt"
-metrics_name = "metrics_cls.png"
+metrics_name = "metrics_both.png"
 gradient_accumulation_steps = 1 # used to simulate larger batch sizes
 batch_size = 128    # if gradient_accumulation_steps > 1, this is the micro-batch size
 train_split = 0.95   # test val split, keep same for resume
 convert_to_greyscale = False
 sequence_len = 3
 sequence_stride = 20
-flip_prob = 0.0
-warp_prob = 0.3
+flip_prob = 0.1
+warp_prob = 0.25
 classifier_type = "bce" # "cce" or "bce"
 restart_schedules = False
-cls_only = True    # if to use the patch embeddings or just the cls token
+cls_option = "both"    # "cls_only", "both", or "patches_only"
+shift_labels = True
 
 # adamw optimizer
 learning_rate = 2e-4 # max learning rate
@@ -87,10 +88,10 @@ else:
     id2label = config.outputs
 
 
-train_dataloader = get_dataloader(current_data_dirs, batch_size, train_split, True,
-                                  classifier_type, sequence_len, sequence_stride, flip_prob, warp_prob, shuffle=True)
-val_dataloader = get_dataloader(current_data_dirs, batch_size, train_split, False,
-                                classifier_type, sequence_len, sequence_stride, flip_prob, warp_prob, shuffle=True)
+train_dataloader = get_dataloader(current_data_dirs, batch_size, train_split, True, classifier_type,
+                                  sequence_len, sequence_stride, flip_prob, warp_prob, shift_labels=shift_labels, shuffle=True)
+val_dataloader = get_dataloader(current_data_dirs, batch_size, train_split, False, classifier_type,
+                                sequence_len, sequence_stride, flip_prob, warp_prob, shift_labels=shift_labels, shuffle=True)
 
 
 iter_num = 0
@@ -107,12 +108,12 @@ def load_model(sample_only=False):
         dino_model = Dinov2ForClassification
     if init_from == 'scratch':
         print("Initializing a new model from scratch")
-        model = dino_model(dino_size, len(id2label), classifier_type=classifier_type, cls_only=cls_only)
+        model = dino_model(dino_size, len(id2label), classifier_type=classifier_type, cls_option=cls_option)
     elif init_from == 'resume':
         print(f"Resuming training from {out_dir}")
         ckpt_path = os.path.join(out_dir, load_checkpoint_name)
         checkpoint = torch.load(ckpt_path, map_location=device)
-        model = dino_model(dino_size, len(id2label), classifier_type=classifier_type, cls_only=cls_only)
+        model = dino_model(dino_size, len(id2label), classifier_type=classifier_type, cls_option=cls_option)
         state_dict = checkpoint['model']
         model.load_state_dict(state_dict, strict=False)
         iter_num = checkpoint['iter_num']
