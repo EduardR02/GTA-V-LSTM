@@ -19,12 +19,16 @@ process = psutil.Process(os.getpid())
 # Set the priority to "High Priority" class
 process.nice(psutil.HIGH_PRIORITY_CLASS)
 
-
-t_time = 0.05   # keep this in case i want a max turn later
+# 0 - 1. Button presses can only be decided each time the model predicts, this is the max fraction of the full duration
+# a turn button will be pressed until the next model prediction. This helps the model to not wiggle from oversteering,
+# which is an "artifact" of low fps at inference time, but high fps when creating data. Meaning a turn key pressed when
+# making the data at higher fps is much less impactful than when the model predicts at a lower fps, because
+# it's prediction lasts for much longer.
+max_steer = 0.6
 output_dict = {"w": 0, "a": 1, "s": 2, "d": 3}
 
 
-def press_and_release(key, t_time=t_time):
+def press_and_release(key, t_time):
     PressKey(key)
     time.sleep(t_time)
     ReleaseKey(key)
@@ -46,8 +50,8 @@ def proportional_output_key(prediction, t_since_last_press):
     """
     press_keys = True
     log_presses = False
-    min_val_steer = 0.03  # 0 - 1
-    speed_threshold = 0.5  # 0 - 1
+    min_val_steer = 0.0  # 0 - 1
+    speed_threshold = 0.1  # 0 - 1
     prediction = prediction.numpy().squeeze()
     # do this before thresholding to get the true values
     prediction = handle_opposite_keys(prediction, output_dict)
@@ -63,7 +67,9 @@ def proportional_output_key(prediction, t_since_last_press):
         for key, duration in zip([W, A, S, D], press_durations):
             if duration > 0:
                 if key in [A, D]:  # Steering keys
-                    worker = Worker(target=press_and_release, args=(key, float(duration)))
+                    max_steer_duration = t_since_last_press * max_steer
+                    steer_duration = float(min(duration, max_steer_duration))
+                    worker = Worker(target=press_and_release, args=(key, steer_duration))
                 else:  # Speed keys
                     worker = Worker(target=PressKey, args=(key,))
             else:
