@@ -262,8 +262,9 @@ def flip_image_with_minimap(image):
 
 
 train_transform = A.Compose([
-    A.PadIfNeeded(min_height=height, min_width=width, border_mode=cv2.BORDER_CONSTANT, value=0),
+    A.HueSaturationValue(p=0.5),
     A.RandomBrightnessContrast(p=0.5),
+    A.PadIfNeeded(min_height=height, min_width=width, border_mode=cv2.BORDER_CONSTANT, value=0),
     A.Normalize(mean=ADE_MEAN, std=ADE_STD, max_pixel_value=255.0),
     ToTensorV2(),
 ])
@@ -300,7 +301,7 @@ def invNormalize(x):
 def test_dataloader():
     data_dirs = ['data/turns']
     sequence_len = 2
-    train_loader = get_dataloader(data_dirs, 1024, 0.95, True, "bce", sequence_len, 40, 1, 1, True)
+    train_loader = get_dataloader(data_dirs, 32, 0.95, True, "bce", sequence_len, 40, 0, 0, True)
     # vizualize data with matplotlib until stopped
     for data, label in train_loader:
         for i in range(data.shape[0]):

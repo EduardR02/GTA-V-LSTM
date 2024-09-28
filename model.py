@@ -126,9 +126,10 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
         """
         super().__init__(size, num_classes, classifier_type)
         self.cls_option = cls_option
-        if cls_option == "cls_only": del self.classifier
-        self.rnn_hidden_size = 64
+        self.rnn_hidden_size = 96
+        self.dropout = torch.nn.Dropout(0.1)
         if cls_option == "cls_only":
+            del self.classifier
             input_size = self.dinov2_config.hidden_size
         elif cls_option == "patches_only":
             input_size = self.classifier.feature_size
@@ -162,6 +163,7 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
 
         # Stack features from all time steps
         features = torch.stack(features, dim=1)  # Shape: (batch_size, time_steps, feature_size)
+        # features = self.dropout(features)
         rnn_out, _ = self.rnn(features)
         rnn_last_output = rnn_out[:, -1, :]
 

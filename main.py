@@ -234,7 +234,7 @@ def get_screencap_img(sct):
     # cv2 in comparison to keras uses width, height order
     img = cv2.resize(img, (config.width, config.height))
     # ! check again with new data
-    img = img.reshape(config.height, config.width, config.color_channels)
+    img = img.reshape(config.height, config.width, 3)
     return img
 
 

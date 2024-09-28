@@ -118,7 +118,7 @@ The dataset and dataloader I made can account for:
 - Try out with cars, without cars, in the city, on the highway, etc.
 
 ## Train yourself
-This code is very multi purpose, as long as you want to predict some class or sequence. In case your data is different you will obviously need to slightly the dataloaders. If you want to collect your own driving data, you can use the provided data collection script (not updated so don't know if it works). I would recommend increasing the resolution (if your gpu is big or you don't mind waiting), and obviously also recording every button press...  
+This code is very multi purpose, as long as you want to predict some class or sequence. In case your data is different you will obviously need to modify the dataloaders. If you want to collect your own driving data, you can use the provided data collection script (not updated so don't know if it works). I would recommend increasing the resolution (if your gpu is big or you don't mind waiting), and obviously also recording every button press...  
 Make sure that each time you start recording you use a new file, as you need to know when a sequence starts and ends.
 
 ## Contribute
