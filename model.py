@@ -9,7 +9,7 @@ class TransferNetwork(torch.nn.Module):
         self.in_channels = in_channels
         self.width = tokenW
         self.height = tokenH
-        self.layer_norm_0 = torch.nn.LayerNorm([in_channels, self.height, self.width])
+        # self.layer_norm_0 = torch.nn.LayerNorm([in_channels, self.height, self.width])
         self.classifier_h1 = torch.nn.Conv2d(in_channels, 32, (5, 5), padding=2)
         self.layer_norm_1 = torch.nn.LayerNorm([32, self.height, self.width])
         self.classifier_h2 = torch.nn.Conv2d(32, 16, (5, 5), padding=2)
@@ -20,7 +20,7 @@ class TransferNetwork(torch.nn.Module):
     def forward(self, embeddings):
         embeddings = embeddings.reshape(-1, self.height, self.width, self.in_channels)
         embeddings = embeddings.permute(0, 3, 1, 2)
-        embeddings = self.layer_norm_0(embeddings)
+        # embeddings = self.layer_norm_0(embeddings)
         embeddings = torch.nn.functional.relu(self.classifier_h1(embeddings))
         embeddings = self.layer_norm_1(embeddings)
         embeddings = torch.nn.functional.relu(self.classifier_h2(embeddings))
@@ -126,8 +126,8 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
         """
         super().__init__(size, num_classes, classifier_type)
         self.cls_option = cls_option
-        self.rnn_hidden_size = 96
-        self.dropout = torch.nn.Dropout(0.1)
+        self.rnn_hidden_size = 512
+        # self.dropout = torch.nn.Dropout(0.2)
         if cls_option == "cls_only":
             del self.classifier
             input_size = self.dinov2_config.hidden_size
@@ -143,6 +143,7 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
             bias=False
         )
         self.layer_norm_3 = torch.nn.LayerNorm(self.rnn_hidden_size)
+        self.fully_connected = torch.nn.Linear(self.rnn_hidden_size, self.rnn_hidden_size)
         self.final_linear_layer = torch.nn.Linear(self.rnn_hidden_size, self.num_classes)
 
     def forward(self, pixel_values, labels=None):
@@ -163,11 +164,12 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
 
         # Stack features from all time steps
         features = torch.stack(features, dim=1)  # Shape: (batch_size, time_steps, feature_size)
-        # features = self.dropout(features)
         rnn_out, _ = self.rnn(features)
-        rnn_last_output = rnn_out[:, -1, :]
-
-        logits = self.final_linear_layer(self.layer_norm_3(rnn_last_output))
+        out = rnn_out[:, -1, :]
+        out = self.layer_norm_3(out)
+        # out = self.dropout(out)
+        out = torch.nn.functional.relu(self.fully_connected(out))
+        logits = self.final_linear_layer(out)
 
         loss = None
         if labels is not None:

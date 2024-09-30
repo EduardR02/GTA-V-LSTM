@@ -8,7 +8,7 @@ import config
 from grabkeys import key_check
 from threading import Thread as Worker
 from training_new import load_model
-from dataloader import val_transform
+from dataloader import transform
 import torch
 import psutil
 import os
@@ -51,7 +51,7 @@ def proportional_output_key(prediction, t_since_last_press):
     press_keys = True
     log_presses = False
     min_val_steer = 0.0  # 0 - 1
-    speed_threshold = 0.1  # 0 - 1
+    speed_threshold = 0.5  # 0 - 1
     prediction = prediction.numpy().squeeze()
     # do this before thresholding to get the true values
     prediction = handle_opposite_keys(prediction, output_dict)
@@ -121,7 +121,7 @@ def main_with_cnn():
     while True:
         counter += 1
         img = get_screencap_img(sct)
-        img = val_transform(image=img)["image"]
+        img = transform(image=img)["image"]
         img = img[None, ...]
         img = img.pin_memory().to("cuda")
 
@@ -170,7 +170,7 @@ def main_with_lstm():
         image_buffer.append((current_time, img))    # timestamp for selecting images with best stride
         selected_images = select_images(image_buffer, desired_interval, config.sequence_len)
 
-        img_tensor = torch.stack([val_transform(image=img)["image"] for img in selected_images], dim=0)   # first timedim, then batch
+        img_tensor = torch.stack([transform(image=img)["image"] for img in selected_images], dim=0)   # first timedim, then batch
         img_tensor = img_tensor[None, ...]  # add dummy batch dim
         img_tensor = img_tensor.pin_memory().to("cuda")
         prediction, _ = model(img_tensor)

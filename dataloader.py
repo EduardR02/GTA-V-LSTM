@@ -37,7 +37,7 @@ class H5Dataset(Dataset):
         self.flip_prob = flip_prob
         self.warp_prob = warp_prob
         self.label_shift = round(config.fps_at_recording_time / config.fps_at_test_time) if shift_labels else 0
-        self.transform = train_transform if is_train else val_transform
+        self.transform = transform
         self.data_files = [os.path.join(data_dir, f) for data_dir in data_dirs for f in sorted(os.listdir(data_dir)) if f.endswith('.h5')]
         self.lookup_table = self._create_lookup_table()
 
@@ -92,9 +92,9 @@ class H5Dataset(Dataset):
                 label = self._to_wasd(label)
             else:
                 label = label.flatten().astype(np.float32)
-        image, label = self.apply_custom_augmentations(image, label)
-        if self.transform:
-            image = self.transform(image=image)['image']
+        image, label, warped = self.apply_custom_augmentations(image, label)
+        image = self.augment_without_minimap([image], warped)[0]
+        image = self.transform(image=image)['image']
 
         return image, label
 
@@ -137,11 +137,26 @@ class H5Dataset(Dataset):
     def apply_custom_augmentations(self, images, labels):
         if not self.is_train:
             return images, labels
+        warped = False
         if random.random() < self.warp_prob:
             images, labels = warp_samples(images, labels)
+            warped = True
         if random.random() < self.flip_prob:
             images, labels = self.flip_samples(images, labels)
-        return images, labels
+        return images, labels, warped
+
+    def augment_without_minimap(self, images, warped):
+        if not self.is_train:
+            return images
+        minimaps = [img[y1:y2, x1:x2] for img in images]
+        # for zoom we would technically need to inpaint, becuase between edge and minimap there will be the small edge
+        # of the old minimap, but the performance hit is massive for some reason
+        augmented_images = train_transform(**{'image' if i == 0 else f'image{i}': img for i, img in enumerate(images)})
+        augmented_images = [augmented_images['image']] + [augmented_images[f'image{i}'] for i in range(1, len(images))]
+
+        for img, minimap in zip(augmented_images, minimaps):
+            img[y1:y2, x1:x2] = minimap
+        return augmented_images
 
 
 class TimeSeriesDataset(H5Dataset):
@@ -171,9 +186,9 @@ class TimeSeriesDataset(H5Dataset):
             labels = self._to_wasd(labels.astype(np.int8))
         else:
             labels = labels.astype(np.float32)
-        images, labels = self.apply_custom_augmentations(images, labels)
-        if self.transform:
-            images = stack([self.transform(image=img)['image'] for img in images], dim=0)
+        images, labels, warped = self.apply_custom_augmentations(images, labels)
+        images = self.augment_without_minimap(images, warped)
+        images = stack([self.transform(image=img)['image'] for img in images], dim=0)
         return images, labels
 
 
@@ -261,16 +276,14 @@ def flip_image_with_minimap(image):
     return image
 
 
+additional_targets = {f'image{i}': 'image' for i in range(1, config.sequence_len)}
 train_transform = A.Compose([
-    A.HueSaturationValue(p=0.5),
-    A.RandomBrightnessContrast(p=0.5),
-    A.PadIfNeeded(min_height=height, min_width=width, border_mode=cv2.BORDER_CONSTANT, value=0),
-    A.Normalize(mean=ADE_MEAN, std=ADE_STD, max_pixel_value=255.0),
-    ToTensorV2(),
-])
+    A.Affine(scale=(1.1, 1.5), p=0.5),
+    A.ColorJitter(p=0.5),
+], additional_targets=additional_targets)
 
 
-val_transform = A.Compose([
+transform = A.Compose([
     A.PadIfNeeded(min_height=height, min_width=width, border_mode=cv2.BORDER_CONSTANT, value=0),
     A.Normalize(mean=ADE_MEAN, std=ADE_STD, max_pixel_value=255.0),
     ToTensorV2(),
@@ -300,8 +313,8 @@ def invNormalize(x):
 
 def test_dataloader():
     data_dirs = ['data/turns']
-    sequence_len = 2
-    train_loader = get_dataloader(data_dirs, 32, 0.95, True, "bce", sequence_len, 40, 0, 0, True)
+    sequence_len = 3
+    train_loader = get_dataloader(data_dirs, 32, 0.95, True, "bce", sequence_len, 20, 0.5, 0.5, True)
     # vizualize data with matplotlib until stopped
     for data, label in train_loader:
         for i in range(data.shape[0]):
