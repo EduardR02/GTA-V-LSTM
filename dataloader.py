@@ -136,7 +136,7 @@ class H5Dataset(Dataset):
 
     def apply_custom_augmentations(self, images, labels):
         if not self.is_train:
-            return images, labels
+            return images, labels, False
         warped = False
         if random.random() < self.warp_prob:
             images, labels = warp_samples(images, labels)
@@ -278,7 +278,7 @@ def flip_image_with_minimap(image):
 
 additional_targets = {f'image{i}': 'image' for i in range(1, config.sequence_len)}
 train_transform = A.Compose([
-    A.Affine(scale=(1.1, 1.5), p=0.5),
+    A.Affine(scale=(1.1, 1.3), p=0.25),
     A.ColorJitter(p=0.5),
 ], additional_targets=additional_targets)
 
@@ -314,7 +314,7 @@ def invNormalize(x):
 def test_dataloader():
     data_dirs = ['data/turns']
     sequence_len = 3
-    train_loader = get_dataloader(data_dirs, 32, 0.95, True, "bce", sequence_len, 20, 0.5, 0.5, True)
+    train_loader = get_dataloader(data_dirs, 32, 0.95, False, "bce", sequence_len, 20, 0., 0., True)
     # vizualize data with matplotlib until stopped
     for data, label in train_loader:
         for i in range(data.shape[0]):
