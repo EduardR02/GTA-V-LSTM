@@ -276,9 +276,11 @@ def flip_image_with_minimap(image):
     return image
 
 
+# not sure about the zoom augmentation, i think it causes training to be quite a bit worse, especially
+# because I don't account for if the image has been warped already to not zoom. (easy but a bit annoying to do)
 additional_targets = {f'image{i}': 'image' for i in range(1, config.sequence_len)}
 train_transform = A.Compose([
-    A.Affine(scale=(1.1, 1.3), p=0.25),
+    # A.Affine(scale=(1.05, 1.2), p=0.2),
     A.ColorJitter(p=0.5),
 ], additional_targets=additional_targets)
 
@@ -314,7 +316,7 @@ def invNormalize(x):
 def test_dataloader():
     data_dirs = ['data/turns']
     sequence_len = 3
-    train_loader = get_dataloader(data_dirs, 32, 0.95, False, "bce", sequence_len, 20, 0., 0., True)
+    train_loader = get_dataloader(data_dirs, 32, 0.95, True, "bce", sequence_len, 20, 0., 0., True)
     # vizualize data with matplotlib until stopped
     for data, label in train_loader:
         for i in range(data.shape[0]):

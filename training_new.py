@@ -23,7 +23,7 @@ print(torch.version.cuda)
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 out_dir = os.path.join('models', 'lstm_label_shift')
-eval_interval = 300
+eval_interval = 500
 log_interval = 1
 eval_iters = 10
 eval_only = False # if True, script exits right after the first eval
@@ -32,16 +32,16 @@ fine_tune = False   # train the entire model or just the top
 freeze_non_dino_layers = False
 init_from = 'scratch' # 'scratch' or 'resume'
 dino_size = "base"
-load_checkpoint_name = "ckpt_96_dropout.pt"
-save_checkpoint_name = "ckpt_96_dropout.pt"
-metrics_name = "metrics_both_96_dropout.png"
+load_checkpoint_name = "ckpt_384.pt"
+save_checkpoint_name = "ckpt_384.pt"
+metrics_name = "metrics_both_384.png"
 gradient_accumulation_steps = 1 # used to simulate larger batch sizes
-batch_size = 128    # if gradient_accumulation_steps > 1, this is the micro-batch size
+batch_size = 64    # if gradient_accumulation_steps > 1, this is the micro-batch size
 train_split = 0.95   # test val split, keep same for resume
 convert_to_greyscale = False
 sequence_len = 3
 sequence_stride = 20
-flip_prob = 0.0
+flip_prob = 0.2
 warp_prob = 0.2
 classifier_type = "bce" # "cce" or "bce"
 restart_schedules = False
@@ -49,7 +49,7 @@ cls_option = "both"    # "cls_only", "both", or "patches_only"
 shift_labels = True
 
 # adamw optimizer
-learning_rate = 1e-4 # max learning rate
+learning_rate = 2e-4 # max learning rate
 max_iters = 60000 # total number of training iterations
 # optimizer settings
 weight_decay = 5e-2
@@ -59,8 +59,8 @@ grad_clip = 0.0 # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
 warmup_iters = 400 # how many steps to warm up for
-lr_decay_iters = 20000 # should be ~= max_iters per Chinchilla
-min_lr = 8e-6 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+lr_decay_iters = 25000 # should be ~= max_iters per Chinchilla
+min_lr = 5e-6 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system

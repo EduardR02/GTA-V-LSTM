@@ -126,7 +126,7 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
         """
         super().__init__(size, num_classes, classifier_type)
         self.cls_option = cls_option
-        self.rnn_hidden_size = 512
+        self.rnn_hidden_size = 384
         # self.dropout = torch.nn.Dropout(0.2)
         if cls_option == "cls_only":
             del self.classifier
@@ -143,6 +143,7 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
             bias=False
         )
         self.layer_norm_3 = torch.nn.LayerNorm(self.rnn_hidden_size)
+        self.layer_norm_4 = torch.nn.LayerNorm(self.rnn_hidden_size)
         self.fully_connected = torch.nn.Linear(self.rnn_hidden_size, self.rnn_hidden_size)
         self.final_linear_layer = torch.nn.Linear(self.rnn_hidden_size, self.num_classes)
 
@@ -169,6 +170,7 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
         out = self.layer_norm_3(out)
         # out = self.dropout(out)
         out = torch.nn.functional.relu(self.fully_connected(out))
+        out = self.layer_norm_4(out)
         logits = self.final_linear_layer(out)
 
         loss = None
