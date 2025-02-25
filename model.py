@@ -162,12 +162,6 @@ class EfficientTransformerBlock(nn.Module):
             k = self.k_proj(x).reshape(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
             v = self.v_proj(x).reshape(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
             
-            # Always force CUDA for xformers operations
-            if not q.is_cuda:
-                q = q.cuda()
-                k = k.cuda()
-                v = v.cuda()
-            
             # Apply xformers memory-efficient attention
             attn_output = xops.memory_efficient_attention(
                 q, k, v, 

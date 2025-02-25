@@ -286,7 +286,7 @@ train_transform = A.Compose([
 
 
 transform = A.Compose([
-    A.PadIfNeeded(min_height=height, min_width=width, border_mode=cv2.BORDER_CONSTANT, value=0),
+    A.PadIfNeeded(min_height=height, min_width=width, border_mode=cv2.BORDER_CONSTANT, fill=0),
     A.Normalize(mean=ADE_MEAN, std=ADE_STD, max_pixel_value=255.0),
     ToTensorV2(),
 ])
