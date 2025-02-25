@@ -10,22 +10,28 @@ class TransferNetwork(torch.nn.Module):
         self.in_channels = in_channels
         self.width = tokenW
         self.height = tokenH
-        # self.layer_norm_0 = torch.nn.LayerNorm([in_channels, self.height, self.width])
-        self.classifier_h1 = torch.nn.Conv2d(in_channels, 32, (5, 5), padding=2)
-        self.layer_norm_1 = torch.nn.LayerNorm([32, self.height, self.width])
-        self.classifier_h2 = torch.nn.Conv2d(32, 16, (5, 5), padding=2)
-        self.classifier_h3 = torch.nn.Conv2d(16, 8, (3, 3), padding=1)
+        
+        # Replace separate Conv2d layers with nn.Sequential for better performance
+        self.feature_extractor = nn.Sequential(
+            nn.Conv2d(in_channels, 32, (5, 5), padding=2),
+            nn.ReLU(inplace=True),  # inplace ReLU saves memory
+            nn.LayerNorm([32, self.height, self.width]),
+            nn.Conv2d(32, 16, (5, 5), padding=2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(16, 8, (3, 3), padding=1),
+            nn.ReLU(inplace=True)
+        )
+        
         self.layer_norm_2 = torch.nn.LayerNorm(8 * self.height * self.width)
         self.classifier_out = torch.nn.Linear(8 * self.height * self.width, num_classes)
 
     def forward(self, embeddings):
-        embeddings = embeddings.reshape(-1, self.height, self.width, self.in_channels)
-        embeddings = embeddings.permute(0, 3, 1, 2)
-        # embeddings = self.layer_norm_0(embeddings)
-        embeddings = torch.nn.functional.relu(self.classifier_h1(embeddings))
-        embeddings = self.layer_norm_1(embeddings)
-        embeddings = torch.nn.functional.relu(self.classifier_h2(embeddings))
-        embeddings = torch.nn.functional.relu(self.classifier_h3(embeddings))
+        # Combine reshape and permute operations
+        embeddings = embeddings.reshape(-1, self.height, self.width, self.in_channels).permute(0, 3, 1, 2)
+        
+        # Use sequential module
+        embeddings = self.feature_extractor(embeddings)
+        
         embeddings = embeddings.reshape(-1, 8 * self.height * self.width)
         embeddings = self.layer_norm_2(embeddings)
         return self.apply_last_layer(embeddings)
@@ -143,49 +149,47 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
             batch_first=True,
             bias=False
         )
-        self.layer_norm_3 = torch.nn.LayerNorm(self.rnn_hidden_size)
-        self.layer_norm_4 = torch.nn.LayerNorm(self.rnn_hidden_size)
-        self.fully_connected = torch.nn.Linear(self.rnn_hidden_size, self.rnn_hidden_size)
-        self.final_linear_layer = torch.nn.Linear(self.rnn_hidden_size, self.num_classes)
+        
+        # Combine FC layers into a sequential module
+        self.fc_head = nn.Sequential(
+            nn.LayerNorm(self.rnn_hidden_size),
+            nn.Linear(self.rnn_hidden_size, self.rnn_hidden_size),
+            nn.ReLU(inplace=True),
+            nn.LayerNorm(self.rnn_hidden_size),
+            nn.Linear(self.rnn_hidden_size, self.num_classes)
+        )
 
     def forward(self, x, labels=None):
         batch_size, seq_len, channels, height, width = x.shape
         
-        # Reshape and process through Dinov2 (common to all options)
+        # Process all frames at once
         x_reshaped = x.reshape(-1, channels, height, width)
         out = self.dinov2(x_reshaped)
         hidden_states = out.last_hidden_state
         
-        # Extract features based on cls_option
         features = None
         
-        # Process patch tokens if needed (for "patches_only" or "both")
+        # More efficient feature extraction
         if self.cls_option in ["patches_only", "both"]:
             processed_patches = self.classifier(hidden_states[:, 1:, :])
             processed_patches = processed_patches.reshape(batch_size, seq_len, -1)
             
-            if self.cls_option == "patches_only":
-                features = processed_patches
-        
-        # Use CLS token if needed (for "cls_only" or "both")
         if self.cls_option in ["cls_only", "both"]:
-            cls_features = hidden_states[:, 0, :]
-            cls_features = cls_features.reshape(batch_size, seq_len, -1)
+            cls_features = hidden_states[:, 0, :].reshape(batch_size, seq_len, -1)
             
-            if self.cls_option == "cls_only":
-                features = cls_features
-        
-        # Combine features if using "both"
+        # Set features based on cls_option
         if self.cls_option == "both":
             features = torch.cat([cls_features, processed_patches], dim=-1)
+        elif self.cls_option == "cls_only":
+            features = cls_features
+        else:  # patches_only
+            features = processed_patches
         
-        outputs, hidden = self.rnn(features)
-        out = outputs[:, -1, :]
-        out = self.layer_norm_3(out)
-        # out = self.dropout(out)
-        out = torch.nn.functional.relu(self.fully_connected(out))
-        out = self.layer_norm_4(out)
-        logits = self.final_linear_layer(out)
+        # Process through RNN and get final timestep output
+        outputs, _ = self.rnn(features)
+        
+        # Use sequential for the final processing
+        logits = self.fc_head(outputs[:, -1, :])
 
         loss = None
         if labels is not None:
