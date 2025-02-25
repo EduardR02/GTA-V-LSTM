@@ -1,6 +1,16 @@
 import torch
 from transformers import Dinov2Model, Dinov2Config
 import torch.nn as nn
+import math
+from torch.nn import functional as F
+
+
+# Add xformers import
+try:
+    import xformers.ops as xops
+    XFORMERS_AVAILABLE = True
+except ImportError:
+    XFORMERS_AVAILABLE = False
 
 
 class TransferNetwork(torch.nn.Module):
@@ -110,92 +120,200 @@ class TransferNetworkRNN(TransferNetwork):
         return embeddings
 
 
-class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
-    def __init__(self, size, num_classes, classifier_type, cls_option="both"):
-        """
-        After lots of confusion, pytorch stateless lstm is the default, and h_0 and c_0 are initialized to 0
-        at the start of each SEQUENCE. There seems to be a lot of confusion on the internet likely from
-        people calling sequences "batches" (which is a very big difference in this case).
-        I was confused because if it was batches, you would have to
-        preserve sample order in a batch and sample sequentially inside of a batch. But pytorch docs (for me) clears
-        this up, because the h_0 and c_0 tensors are (D∗num_layers,N,Hout). Because we have N as a dim here that means
-        that it's zero for each sequence.
-        My initial investigation came from the fact that the loss function would dip (good, but weird) after each time
-        the dataset would "end" and the next iter(dataloader) would be called. I thought this would cause some
-        lstm hidden state contamination, but this doesn't seem to be the issue as the lstm is stateless here.
+class EfficientTransformerBlock(nn.Module):
+    def __init__(self, hidden_size, num_heads, dropout=0.0, use_xformers=True):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.head_dim = hidden_size // num_heads
+        self.use_xformers = use_xformers and XFORMERS_AVAILABLE
+        
+        # Self-attention
+        self.norm1 = nn.LayerNorm(hidden_size)
+        
+        if self.use_xformers:
+            self.q_proj = nn.Linear(hidden_size, hidden_size)
+            self.k_proj = nn.Linear(hidden_size, hidden_size)
+            self.v_proj = nn.Linear(hidden_size, hidden_size)
+            self.out_proj = nn.Linear(hidden_size, hidden_size)
+            self.dropout = dropout
+        else:
+            self.self_attn = nn.MultiheadAttention(hidden_size, num_heads, dropout=dropout, batch_first=True)
+        
+        # Feed-forward
+        self.norm2 = nn.LayerNorm(hidden_size)
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_size, 4 * hidden_size),
+            nn.GELU(),
+            nn.Linear(4 * hidden_size, hidden_size)
+        )
 
-        Update: I think the loss issue comes from the dataset sampler. Apparently I thought that by default
-        replacement should be True, which means that a sample can be drawn multiple times
-        (and the len param of the dataset is "artificial"). This is not the case.
-        By default it is False, so each dataloader actually goes through the entire dataset once.
-        The loss jump is just normal epoch behavior then.
-        https://pytorch.org/docs/stable/generated/torch.nn.LSTM.html
-        """
+    def forward(self, x):
+        # Self-attention with pre-norm
+        residual = x
+        x = self.norm1(x)
+        
+        if self.use_xformers:
+            # Simple xformers implementation - always force CUDA
+            batch_size, seq_len, _ = x.size()
+            
+            # Project to queries, keys, values
+            q = self.q_proj(x).reshape(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+            k = self.k_proj(x).reshape(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+            v = self.v_proj(x).reshape(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+            
+            # Always force CUDA for xformers operations
+            if not q.is_cuda:
+                q = q.cuda()
+                k = k.cuda()
+                v = v.cuda()
+            
+            # Apply xformers memory-efficient attention
+            attn_output = xops.memory_efficient_attention(
+                q, k, v, 
+                attn_bias=None, 
+                p=self.dropout,
+                scale=float(self.head_dim ** -0.5)
+            )
+                
+            # Reshape output and project back to hidden_size
+            attn_output = attn_output.permute(0, 2, 1, 3).reshape(batch_size, seq_len, self.hidden_size)
+            x = self.out_proj(attn_output)
+        else:
+            # Standard PyTorch implementation
+            x, _ = self.self_attn(x, x, x)
+        
+        x = residual + x
+        
+        # Feed-forward with pre-norm
+        residual = x
+        x = self.norm2(x)
+        x = residual + self.ffn(x)
+        
+        return x
+
+class EfficientTransformer(nn.Module):
+    def __init__(self, hidden_size, num_heads, num_layers, dropout=0.0, use_xformers=True):
+        super().__init__()
+        self.layers = nn.ModuleList([
+            EfficientTransformerBlock(hidden_size, num_heads, dropout, use_xformers)
+            for _ in range(num_layers)
+        ])
+        self.norm = nn.LayerNorm(hidden_size)
+        
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return self.norm(x)
+
+class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
+    def __init__(self, size, num_classes, classifier_type, cls_option="both", dropout_rate=0.0, use_classifier=True):
         super().__init__(size, num_classes, classifier_type)
         self.cls_option = cls_option
-        self.rnn_hidden_size = 384
-        # self.dropout = torch.nn.Dropout(0.2)
-        if cls_option == "cls_only":
-            del self.classifier
-            input_size = self.dinov2_config.hidden_size
-        elif cls_option == "patches_only":
-            input_size = self.classifier.feature_size
-        elif cls_option == "both":
-            input_size = self.dinov2_config.hidden_size + self.classifier.feature_size
-        self.rnn = torch.nn.LSTM(
-            input_size=input_size,
-            hidden_size=self.rnn_hidden_size,
-            num_layers=1,
-            batch_first=True,
-            bias=False
+        self.use_classifier = use_classifier
+        
+        # Determine input dimensions
+        if not use_classifier and cls_option in ["patches_only", "both"]:
+            # Use raw DinoV2 outputs (768 or 1024 dim)
+            patch_dim = self.dinov2_config.hidden_size
+        elif use_classifier and cls_option in ["patches_only", "both"]:
+            # Use classifier reduced dimension
+            patch_dim = self.classifier.feature_size
+        else:
+            patch_dim = 0
+            
+        cls_dim = self.dinov2_config.hidden_size if cls_option in ["cls_only", "both"] else 0
+        
+        # Total input dimension
+        input_dim = patch_dim + cls_dim
+        
+        # Transformer configuration
+        self.transformer_dim = 512
+        self.num_heads = 8
+        self.num_layers = 4
+        
+        # Projection layer (if needed)
+        self.projection = nn.Linear(input_dim, self.transformer_dim) if input_dim != self.transformer_dim else nn.Identity()
+        
+        # Positional encoding
+        self.register_buffer(
+            "pos_embedding", 
+            self.get_positional_embeddings(100, self.transformer_dim)
         )
         
-        # Combine FC layers into a sequential module
-        self.fc_head = nn.Sequential(
-            nn.LayerNorm(self.rnn_hidden_size),
-            nn.Linear(self.rnn_hidden_size, self.rnn_hidden_size),
-            nn.ReLU(inplace=True),
-            nn.LayerNorm(self.rnn_hidden_size),
-            nn.Linear(self.rnn_hidden_size, self.num_classes)
+        # Efficient transformer without dropout
+        self.transformer = EfficientTransformer(
+            hidden_size=self.transformer_dim,
+            num_heads=self.num_heads,
+            num_layers=self.num_layers,
+            dropout=dropout_rate
         )
+        
+        # Simplified classification head - just a single linear projection
+        self.fc_head = nn.Linear(self.transformer_dim, num_classes)
 
+    def get_positional_embeddings(self, seq_len, dim):
+        """Return positional embeddings."""
+        position = torch.arange(seq_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, dim, 2) * (-math.log(10000.0) / dim))
+        pos_embedding = torch.zeros(seq_len, dim)
+        pos_embedding[:, 0::2] = torch.sin(position * div_term)
+        pos_embedding[:, 1::2] = torch.cos(position * div_term)
+        return pos_embedding
+        
     def forward(self, x, labels=None):
         batch_size, seq_len, channels, height, width = x.shape
         
-        # Process all frames at once
+        # Process all frames at once through DinoV2
         x_reshaped = x.reshape(-1, channels, height, width)
         out = self.dinov2(x_reshaped)
         hidden_states = out.last_hidden_state
         
-        features = None
+        # Choose features based on configuration
+        features_list = []
         
-        # More efficient feature extraction
-        if self.cls_option in ["patches_only", "both"]:
-            processed_patches = self.classifier(hidden_states[:, 1:, :])
-            processed_patches = processed_patches.reshape(batch_size, seq_len, -1)
-            
         if self.cls_option in ["cls_only", "both"]:
+            # Get CLS token features
             cls_features = hidden_states[:, 0, :].reshape(batch_size, seq_len, -1)
-            
-        # Set features based on cls_option
-        if self.cls_option == "both":
-            features = torch.cat([cls_features, processed_patches], dim=-1)
-        elif self.cls_option == "cls_only":
-            features = cls_features
-        else:  # patches_only
-            features = processed_patches
+            features_list.append(cls_features)
         
-        # Process through RNN and get final timestep output
-        outputs, _ = self.rnn(features)
+        if self.cls_option in ["patches_only", "both"]:
+            patches = hidden_states[:, 1:, :]
+            if self.use_classifier:
+                # Use classifier to reduce dimension
+                processed_patches = self.classifier(patches)
+                processed_patches = processed_patches.reshape(batch_size, seq_len, -1)
+                features_list.append(processed_patches)
+            else:
+                # Use raw patch embeddings (mean pooling across patches)
+                raw_patches = patches.mean(dim=1).reshape(batch_size, seq_len, -1)
+                features_list.append(raw_patches)
         
-        # Use sequential for the final processing
-        logits = self.fc_head(outputs[:, -1, :])
-
+        # Combine features
+        combined_features = torch.cat(features_list, dim=-1) if len(features_list) > 1 else features_list[0]
+        
+        # Project to transformer dimension if needed
+        features = self.projection(combined_features)
+        
+        # Add positional encoding
+        pos_emb = self.pos_embedding[:seq_len].unsqueeze(0)
+        features = features + pos_emb
+        
+        # Apply transformer
+        transformer_output = self.transformer(features)
+        
+        # Use last token representation for classification
+        last_state = transformer_output[:, -1]
+        
+        # Classification
+        logits = self.fc_head(last_state)
+        
+        # Calculate loss if labels provided
         loss = None
         if labels is not None:
             last_label = labels[:, -1, :]
             loss = self.loss_fct(logits.view(-1, self.num_classes), last_label.view(-1, self.num_classes))
-
+            
         return logits, loss
 
     def get_classifier(self):

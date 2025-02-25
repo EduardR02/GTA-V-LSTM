@@ -5,3 +5,4 @@ models/
 __pycache__/
 .idea/
 *.h5
+.venv/

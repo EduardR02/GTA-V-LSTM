@@ -45,14 +45,14 @@ flip_prob = 0.2
 warp_prob = 0.2
 classifier_type = "bce" # "cce" or "bce"
 restart_schedules = False
-cls_option = "patches_only"    # "cls_only", "both", or "patches_only"
+cls_option = "both"    # "cls_only", "both", or "patches_only"
 shift_labels = True
 
 # adamw optimizer
 learning_rate = 2e-4 # max learning rate
 max_iters = 60000 # total number of training iterations
 # optimizer settings
-weight_decay = 5e-2
+weight_decay = 0.1
 beta1 = 0.9
 beta2 = 0.995
 grad_clip = 0.0 # clip gradients at this value, or disable if == 0.0
@@ -67,7 +67,7 @@ backend = 'nccl' # 'nccl', 'gloo', etc.
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 # change this to bf16 if your gpu actually supports it
 dtype = 'float16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
-compile = False # use PyTorch 2.0 to compile the model to be faster
+compile = True # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 config_dict = {k: globals()[k] for k in config_keys} # will be useful for logging
@@ -148,7 +148,7 @@ def load_model(sample_only=False):
     model.to(device)
 
     # initialize a GradScaler. If enabled=False scaler is a no-op
-    scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+    scaler = torch.amp.GradScaler('cuda', enabled=(dtype == 'float16'))
 
     # optimizer
     optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
@@ -209,7 +209,7 @@ def moving_average(data, window_size):
 
 def calc_accuracy(logits, labels):
     # Convert logits and labels to numpy arrays
-    preds = logits.detach().cpu()
+    preds = logits.detach().cpu().float()
     if classifier_type == "bce":
         preds = torch.nn.functional.sigmoid(preds)
         preds = (preds.numpy() >= 0.5)
