@@ -22,7 +22,7 @@ print(torch.version.cuda)
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
-out_dir = os.path.join('models', 'lstm_label_shift')
+out_dir = os.path.join('models', 'test')
 eval_interval = 500
 log_interval = 1
 eval_iters = 10
@@ -81,6 +81,7 @@ device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.aut
 # note: float16 data type will automatically use a GradScaler
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+num_workers = 4
 
 if classifier_type == "bce":
     id2label = {0: "w", 1: "a", 2: "s", 3: "d"}
@@ -89,9 +90,9 @@ else:
 
 
 train_dataloader = get_dataloader(current_data_dirs, batch_size, train_split, True, classifier_type,
-                                  sequence_len, sequence_stride, flip_prob, warp_prob, shift_labels=shift_labels, shuffle=True)
+                                  sequence_len, sequence_stride, flip_prob, warp_prob, shift_labels=shift_labels, shuffle=True, num_workers=num_workers)
 val_dataloader = get_dataloader(current_data_dirs, batch_size, train_split, False, classifier_type,
-                                sequence_len, sequence_stride, flip_prob, warp_prob, shift_labels=shift_labels, shuffle=True)
+                                sequence_len, sequence_stride, flip_prob, warp_prob, shift_labels=shift_labels, shuffle=True, num_workers=num_workers)
 
 
 iter_num = 0

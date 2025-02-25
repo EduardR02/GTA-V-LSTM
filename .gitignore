@@ -2,6 +2,6 @@
 logs/
 data_in_chunks_temp/
 models/
-_pycache_/
+__pycache__/
 .idea/
 *.h5

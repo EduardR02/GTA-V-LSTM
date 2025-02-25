@@ -49,7 +49,7 @@ class H5Dataset(Dataset):
         seq_stride = 0 if not hasattr(self, 'sequence_stride') else self.sequence_stride
         effective_sequence_length = (seq_len - 1) * seq_stride + self.label_shift
         for file_path in self.data_files:
-            with h5py.File(file_path, 'r') as f:
+            with h5py.File(file_path, 'r', libver='latest', swmr=True) as f:
                 file_samples = f['labels'].shape[0]
                 file_samples -= effective_sequence_length
                 if "stuck" in file_path:
@@ -84,7 +84,7 @@ class H5Dataset(Dataset):
         if "stuck" in file_path:
             local_idx += config.amt_remove_after_pause - self.label_shift
 
-        with h5py.File(file_path, 'r') as f:
+        with h5py.File(file_path, 'r', libver='latest', swmr=True) as f:
             image = f['images'][local_idx]
             label = f['labels'][local_idx + self.label_shift]
             if self.classifier_type == "bce":
@@ -176,7 +176,7 @@ class TimeSeriesDataset(H5Dataset):
         sequence_range = (self.sequence_len - 1) * self.sequence_stride
         if "stuck" in file_path:
             local_idx += max(config.amt_remove_after_pause - sequence_range - self.label_shift, 0)
-        with h5py.File(file_path, 'r') as f:
+        with h5py.File(file_path, 'r', libver='latest', swmr=True) as f:
             # Get sequence with stride
             img_indices = range(local_idx, local_idx + self.sequence_len * self.sequence_stride, self.sequence_stride)
             label_indices = range(local_idx + self.label_shift, local_idx + self.label_shift + self.sequence_len * self.sequence_stride, self.sequence_stride)
@@ -292,7 +292,9 @@ transform = A.Compose([
 ])
 
 
-def get_dataloader(data_dir, batch_size, train_split, is_train, classifier_type, sequence_len=1, sequence_stride=1, flip_prob=0., warp_prob=0., shift_labels=True, shuffle=True):
+def get_dataloader(data_dir, batch_size, train_split, is_train, classifier_type, sequence_len=1, 
+                  sequence_stride=1, flip_prob=0., warp_prob=0., shift_labels=True, shuffle=True,
+                  num_workers=0, persistent_workers=True):
     if sequence_len > 1:
         dataset = TimeSeriesDataset(data_dir, train_split, is_train, classifier_type, flip_prob, warp_prob, sequence_len, sequence_stride, shift_labels)
     else:
@@ -303,7 +305,9 @@ def get_dataloader(data_dir, batch_size, train_split, is_train, classifier_type,
         shuffle=shuffle,
         pin_memory=True,
         pin_memory_device="cuda",
-        drop_last=True
+        drop_last=True,
+        num_workers=num_workers,
+        persistent_workers=persistent_workers if num_workers > 0 else False,
     )
     return dataloader
 
@@ -316,7 +320,9 @@ def invNormalize(x):
 def test_dataloader():
     data_dirs = ['data/turns']
     sequence_len = 3
-    train_loader = get_dataloader(data_dirs, 32, 0.95, True, "bce", sequence_len, 20, 0., 0., True)
+    # Test with workers
+    train_loader = get_dataloader(data_dirs, 32, 0.95, True, "bce", sequence_len, 20, 0., 0., True, 
+                                  num_workers=2)  # Try with 2 workers for testing
     # vizualize data with matplotlib until stopped
     for data, label in train_loader:
         for i in range(data.shape[0]):
