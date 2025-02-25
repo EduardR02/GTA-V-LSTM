@@ -1,5 +1,6 @@
 import torch
 from transformers import Dinov2Model, Dinov2Config
+import torch.nn as nn
 
 
 class TransferNetwork(torch.nn.Module):
@@ -147,26 +148,39 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
         self.fully_connected = torch.nn.Linear(self.rnn_hidden_size, self.rnn_hidden_size)
         self.final_linear_layer = torch.nn.Linear(self.rnn_hidden_size, self.num_classes)
 
-    def forward(self, pixel_values, labels=None):
-        batch_size, time_steps, channels, height, width = pixel_values.shape
-
-        # Process each time step
-        if self.cls_option == "cls_only":
-            features = [self.dinov2(pixel_values[:, t]).last_hidden_state[:, 0, :] for t in range(time_steps)]
-        elif self.cls_option == "patches_only":
-            features = [self.classifier(self.dinov2(pixel_values[:, t]).last_hidden_state[:, 1:, :]) for t in range(time_steps)]
-        else:
-            features = []
-            for t in range(time_steps):
-                output = self.dinov2(pixel_values[:, t])
-                classifier_out = self.classifier(output.last_hidden_state[:, 1:, :])
-                cls = output.last_hidden_state[:, 0, :]
-                features.append(torch.cat((classifier_out, cls), dim=1))
-
-        # Stack features from all time steps
-        features = torch.stack(features, dim=1)  # Shape: (batch_size, time_steps, feature_size)
-        rnn_out, _ = self.rnn(features)
-        out = rnn_out[:, -1, :]
+    def forward(self, x, labels=None):
+        batch_size, seq_len, channels, height, width = x.shape
+        
+        # Reshape and process through Dinov2 (common to all options)
+        x_reshaped = x.reshape(-1, channels, height, width)
+        out = self.dinov2(x_reshaped)
+        hidden_states = out.last_hidden_state
+        
+        # Extract features based on cls_option
+        features = None
+        
+        # Process patch tokens if needed (for "patches_only" or "both")
+        if self.cls_option in ["patches_only", "both"]:
+            processed_patches = self.classifier(hidden_states[:, 1:, :])
+            processed_patches = processed_patches.reshape(batch_size, seq_len, -1)
+            
+            if self.cls_option == "patches_only":
+                features = processed_patches
+        
+        # Use CLS token if needed (for "cls_only" or "both")
+        if self.cls_option in ["cls_only", "both"]:
+            cls_features = hidden_states[:, 0, :]
+            cls_features = cls_features.reshape(batch_size, seq_len, -1)
+            
+            if self.cls_option == "cls_only":
+                features = cls_features
+        
+        # Combine features if using "both"
+        if self.cls_option == "both":
+            features = torch.cat([cls_features, processed_patches], dim=-1)
+        
+        outputs, hidden = self.rnn(features)
+        out = outputs[:, -1, :]
         out = self.layer_norm_3(out)
         # out = self.dropout(out)
         out = torch.nn.functional.relu(self.fully_connected(out))

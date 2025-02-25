@@ -45,7 +45,7 @@ flip_prob = 0.2
 warp_prob = 0.2
 classifier_type = "bce" # "cce" or "bce"
 restart_schedules = False
-cls_option = "both"    # "cls_only", "both", or "patches_only"
+cls_option = "patches_only"    # "cls_only", "both", or "patches_only"
 shift_labels = True
 
 # adamw optimizer
@@ -81,7 +81,7 @@ device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.aut
 # note: float16 data type will automatically use a GradScaler
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
-num_workers = 4
+num_workers = 1
 
 if classifier_type == "bce":
     id2label = {0: "w", 1: "a", 2: "s", 3: "d"}
