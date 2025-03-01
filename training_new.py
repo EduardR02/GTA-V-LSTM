@@ -32,9 +32,9 @@ fine_tune = False   # train the entire model or just the top
 freeze_non_dino_layers = False
 init_from = 'scratch' # 'scratch' or 'resume'
 dino_size = "base"
-load_checkpoint_name = "ckpt_384.pt"
-save_checkpoint_name = "ckpt_384.pt"
-metrics_name = "metrics_both_384.png"
+load_checkpoint_name = "ckpt_transformer_12_4.pt"
+save_checkpoint_name = "ckpt_transformer_12_4.pt"
+metrics_name = "metrics_both_12_4.png"
 gradient_accumulation_steps = 1 # used to simulate larger batch sizes
 batch_size = 64    # if gradient_accumulation_steps > 1, this is the micro-batch size
 train_split = 0.95   # test val split, keep same for resume
@@ -52,9 +52,9 @@ shift_labels = True
 learning_rate = 2e-4 # max learning rate
 max_iters = 60000 # total number of training iterations
 # optimizer settings
-weight_decay = 0.1
+weight_decay = 0.05
 beta1 = 0.9
-beta2 = 0.995
+beta2 = 0.999
 grad_clip = 0.0 # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
@@ -207,6 +207,7 @@ def moving_average(data, window_size):
     return (cumsum_vec[window_size:] - cumsum_vec[:-window_size]) / window_size
 
 
+@torch.no_grad()
 def calc_accuracy(logits, labels):
     # Convert logits and labels to numpy arrays
     preds = logits.detach().cpu().float()

@@ -9,6 +9,7 @@ from torch.nn import functional as F
 try:
     import xformers.ops as xops
     XFORMERS_AVAILABLE = True
+    print("successfully imported xformers")
 except ImportError:
     XFORMERS_AVAILABLE = False
 
@@ -261,7 +262,7 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
         # DinoV2 embedding dimension
         self.dino_embed_dim = self.dinov2_config.hidden_size  # 768 for DinoV2
         # Transformer parameters - keep fixed head count
-        self.num_heads = 8
+        self.num_heads = 12
         self.num_layers = 4
         
         # Calculate exact context length based on patches and frames
@@ -269,7 +270,7 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
         self.max_frames = 3
         
         # Determine transformer embedding dimension
-        self.use_dino_embed_size = False
+        self.use_dino_embed_size = True
         self.transformer_dim = 256
         if self.use_dino_embed_size or self.transformer_dim is None:
             self.embed_dim = self.dino_embed_dim
@@ -336,7 +337,7 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
             sequence = torch.cat([learnable_cls, all_tokens], dim=1)
         
         # Apply transformer
-        cls_output = self.transformer(sequence)
+        cls_output = self.transformer(sequence)[:, 0]  # Shape: [batch, embed_dim] (squeezes size 1 dim in between, transformer output is already only "1" size due to only outputting cls token, but we have to squeeze the dim)
         
         # Final classification
         logits = self.fc_head(cls_output)

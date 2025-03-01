@@ -321,7 +321,7 @@ def test_dataloader():
     data_dirs = ['data/turns']
     sequence_len = 3
     # Test with workers
-    train_loader = get_dataloader(data_dirs, 32, 0.95, True, "bce", sequence_len, 20, 0., 0., True, 
+    train_loader = get_dataloader(data_dirs, 32, 0.95, True, "bce", sequence_len, 20, 0., 0.5, True, 
                                   num_workers=2)  # Try with 2 workers for testing
     # vizualize data with matplotlib until stopped
     for data, label in train_loader:
