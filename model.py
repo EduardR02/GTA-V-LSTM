@@ -121,7 +121,7 @@ class TransferNetworkRNN(TransferNetwork):
 
 
 class EfficientTransformerBlock(nn.Module):
-    def __init__(self, hidden_size, num_heads, dropout=0.0, use_xformers=True):
+    def __init__(self, hidden_size, num_heads, dropout=0.0, use_xformers=True, max_seq_len=4096):
         super().__init__()
         self.hidden_size = hidden_size
         self.num_heads = num_heads
@@ -141,7 +141,7 @@ class EfficientTransformerBlock(nn.Module):
             # Use torchtune RoPE
             if XFORMERS_AVAILABLE:
                 from torchtune.modules import RotaryPositionalEmbeddings
-                self.rotary_emb = RotaryPositionalEmbeddings(self.head_dim)
+                self.rotary_emb = RotaryPositionalEmbeddings(self.head_dim, max_seq_len=max_seq_len)
             else:
                 self.rotary_emb = None
         else:
@@ -200,10 +200,10 @@ class EfficientTransformerBlock(nn.Module):
         return x
 
 class EfficientTransformer(nn.Module):
-    def __init__(self, hidden_size, num_heads, num_layers, dropout=0.0, use_xformers=True):
+    def __init__(self, hidden_size, num_heads, num_layers, dropout=0.0, use_xformers=True, max_seq_len=4096):
         super().__init__()
         self.layers = nn.ModuleList([
-            EfficientTransformerBlock(hidden_size, num_heads, dropout, use_xformers)
+            EfficientTransformerBlock(hidden_size, num_heads, dropout, use_xformers, max_seq_len)
             for _ in range(num_layers)
         ])
         self.norm = nn.LayerNorm(hidden_size)
@@ -219,15 +219,30 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
         self.cls_option = cls_option
         
         # DinoV2 embedding dimension
-        self.embed_dim = self.dinov2_config.hidden_size  # 768 for DinoV2
-            
-        # Transformer parameters - align with embedding dimension
-        self.num_heads = 12  # 768/12 = 64 head_dim
+        self.dino_embed_dim = self.dinov2_config.hidden_size  # 768 for DinoV2
+        # Transformer parameters - keep fixed head count
+        self.num_heads = 8
         self.num_layers = 4
         
         # Calculate exact context length based on patches and frames
         self.patches_per_frame = 13 * 18  # 234 patches per frame
         self.max_frames = 3
+        
+        # Determine transformer embedding dimension
+        self.use_dino_embed_size = False
+        self.transformer_dim = 256
+        if self.use_dino_embed_size or self.transformer_dim is None:
+            self.embed_dim = self.dino_embed_dim
+        else:
+            self.embed_dim = self.transformer_dim
+            # Need dimension to be divisible by 2*num_heads for rotary embeddings, and some other limitations for xformers attention, but I decided against
+            # auto fixing it, let the user set the correct transformer_dim!
+            
+        # Add projection layer from DinoV2 embedding to transformer embedding
+        if self.dino_embed_dim != self.embed_dim:
+            self.projection = nn.Linear(self.dino_embed_dim, self.embed_dim)
+        else:
+            self.projection = nn.Identity()
         
         # Set context length based on configuration
         if cls_option == "patches_only":
@@ -237,7 +252,7 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
             # All patches + frame CLS tokens + 1 learnable CLS token
             self.context_length = self.patches_per_frame * self.max_frames + self.max_frames + 1
         
-        # Learnable CLS token
+        # Learnable CLS token (uses transformer embedding dimension)
         self.cls_token = nn.Parameter(torch.randn(1, 1, self.embed_dim))
         
         # Transformer encoder with xformers
@@ -246,10 +261,11 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
             num_heads=self.num_heads,
             num_layers=self.num_layers,
             dropout=dropout_rate,
-            use_xformers=True  # Ensure xformers is used
+            use_xformers=True,  # Ensure xformers is used
+            max_seq_len=self.context_length
         )
         
-        # Classification head
+        # Classification head (from transformer dimension to num_classes)
         self.fc_head = nn.Linear(self.embed_dim, num_classes)
 
     def forward(self, x, labels=None):
@@ -257,30 +273,29 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
         
         # Process all frames through DinoV2
         x_reshaped = x.reshape(-1, channels, height, width)
-        with torch.no_grad():  # Optionally freeze DinoV2 for efficiency
-            out = self.dinov2(x_reshaped)
+        out = self.dinov2(x_reshaped)
         hidden_states = out.last_hidden_state
-        patches = hidden_states[:, 1:, :]   # [batch*seq_len, num_patches, hidden_dim] (excluding cls token)
-        if self.cls_option == "patches_only":
-            
-            # Reshape to [batch, seq_len*num_patches, hidden_dim]
-            num_patches = patches.size(1)
-            patches = patches.reshape(batch_size, seq_len * num_patches, -1)
-            
-            # Add learnable CLS token
-            cls_tokens = self.cls_token.expand(batch_size, -1, -1)
-            sequence = torch.cat([cls_tokens, patches], dim=1)
-            
-        else:  # "both"
-            # Get both CLS tokens and patches
-            cls_tokens = hidden_states[:, 0, :].reshape(batch_size, seq_len, -1)
-            patches = hidden_states[:, 1:, :].reshape(batch_size, seq_len * patches.size(1), -1)
-            
-            # Add learnable CLS token
-            learnable_cls = self.cls_token.expand(batch_size, -1, -1)
-            sequence = torch.cat([learnable_cls, cls_tokens, patches], dim=1)
         
-        # Apply transformer (rotary embeddings are handled internally)
+        # Project all hidden states at once
+        projected = self.projection(hidden_states)
+        
+        # Reshape to separate frames
+        projected = projected.reshape(batch_size, seq_len, -1, self.embed_dim)
+        
+        # Prepare learnable CLS token
+        learnable_cls = self.cls_token.expand(batch_size, 1, -1)
+        
+        # Handle sequence composition based on configuration
+        if self.cls_option == "patches_only":
+            # Skip the DinoV2 CLS token (first token of each frame)
+            patches = projected[:, :, 1:, :].reshape(batch_size, -1, self.embed_dim)
+            sequence = torch.cat([learnable_cls, patches], dim=1)
+        else:  # "both"
+            # Keep all tokens (includes CLS tokens)
+            all_tokens = projected.reshape(batch_size, -1, self.embed_dim)
+            sequence = torch.cat([learnable_cls, all_tokens], dim=1)
+        
+        # Apply transformer
         transformer_output = self.transformer(sequence)
         
         # Use first token (CLS) for classification
@@ -292,19 +307,9 @@ class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
         # Calculate loss if labels provided
         loss = None
         if labels is not None:
-            if self.classifier_type == "bce":
-                if labels.dim() == 3:  # Sequence of labels
-                    last_label = labels[:, -1, :]
-                    loss = self.loss_fct(logits, last_label)
-                else:
-                    loss = self.loss_fct(logits, labels)
-            else:  # CrossEntropy
-                if labels.dim() > 1:  # Sequence of labels
-                    last_label = labels[:, -1]
-                    loss = self.loss_fct(logits, last_label)
-                else:
-                    loss = self.loss_fct(logits, labels)
-            
+            last_label = labels[:, -1, :]
+            loss = self.loss_fct(logits.view(-1, self.num_classes), last_label.view(-1, self.num_classes))
+                
         return logits, loss
 
     def get_classifier(self):
