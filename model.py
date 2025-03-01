@@ -155,23 +155,67 @@ class EfficientTransformerBlock(nn.Module):
             nn.Linear(4 * hidden_size, hidden_size)
         )
 
-    def forward(self, x):
+    def forward(self, x, cls_attention_only=False):
         # Self-attention with pre-norm
         residual = x
-        x = self.norm1(x)
+        x_norm = self.norm1(x)
         
-        if self.use_xformers:
-            # Simple xformers implementation with rotary embeddings
-            batch_size, seq_len, _ = x.size()
+        if cls_attention_only:
+            # Only compute attention for CLS token (first token)
+            batch_size, seq_len, _ = x_norm.size()
             
-            # Project to queries, keys, values
-            q = self.q_proj(x).reshape(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-            k = self.k_proj(x).reshape(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-            v = self.v_proj(x).reshape(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+            # Extract CLS token query and compute attention manually
+            q_cls = self.q_proj(x_norm[:, 0:1])  # [batch, 1, hidden]
+            k = self.k_proj(x_norm)              # [batch, seq, hidden]
+            v = self.v_proj(x_norm)              # [batch, seq, hidden]
+            
+            # Reshape for attention computation
+            q_cls = q_cls.view(batch_size, 1, self.num_heads, self.head_dim).transpose(1, 2)  # [batch, heads, 1, head_dim]
+            k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)    # [batch, heads, seq, head_dim]
+            v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)    # [batch, heads, seq, head_dim]
             
             # Apply rotary embeddings if available
             if self.rotary_emb is not None:
-                # Apply xformers rotary embeddings
+                q_cls = self.rotary_emb(q_cls)
+                k = self.rotary_emb(k)
+            
+            # Manual attention for CLS token only
+            attn_weights = torch.matmul(q_cls, k.transpose(-1, -2)) / math.sqrt(self.head_dim)  # [batch, heads, 1, seq]
+            attn_probs = F.softmax(attn_weights, dim=-1)
+            if self.dropout > 0:
+                attn_probs = F.dropout(attn_probs, p=self.dropout, training=self.training)
+            
+            # Apply attention weights
+            attn_output = torch.matmul(attn_probs, v)  # [batch, heads, 1, head_dim]
+            
+            # Reshape and project
+            attn_output = attn_output.transpose(1, 2).reshape(batch_size, 1, self.hidden_size)  # [batch, 1, hidden]
+            attn_output = self.out_proj(attn_output)
+            
+            # Add residual for CLS token only
+            cls_with_residual = residual[:, 0:1] + attn_output
+            
+            # Feed-forward - only apply to CLS token
+            cls_norm = self.norm2(cls_with_residual)
+            cls_ffn = self.ffn(cls_norm)
+            cls_with_ffn = cls_with_residual + cls_ffn
+            
+            # Concatenate the updated CLS token with the unchanged tokens
+            x = torch.cat([cls_with_ffn, residual[:, 1:]], dim=1)
+            
+            return x
+            
+        elif self.use_xformers:
+            # Regular attention for all tokens
+            batch_size, seq_len, _ = x_norm.size()
+            
+            # Project to queries, keys, values
+            q = self.q_proj(x_norm).reshape(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+            k = self.k_proj(x_norm).reshape(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+            v = self.v_proj(x_norm).reshape(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+            
+            # Apply rotary embeddings if available
+            if self.rotary_emb is not None:
                 q = self.rotary_emb(q)
                 k = self.rotary_emb(k)
             
@@ -185,17 +229,16 @@ class EfficientTransformerBlock(nn.Module):
                 
             # Reshape output and project back to hidden_size
             attn_output = attn_output.permute(0, 2, 1, 3).reshape(batch_size, seq_len, self.hidden_size)
-            x = self.out_proj(attn_output)
+            x = residual + self.out_proj(attn_output)
         else:
-            # Standard PyTorch implementation
-            x, _ = self.self_attn(x, x, x)
-        
-        x = residual + x
-        
-        # Feed-forward with pre-norm
-        residual = x
-        x = self.norm2(x)
-        x = residual + self.ffn(x)
+            # Standard PyTorch implementation (no special optimization)
+            attn_output, _ = self.self_attn(x_norm, x_norm, x_norm)
+            x = residual + attn_output
+            
+            # Feed-forward
+            residual = x
+            x = self.norm2(x)
+            x = residual + self.ffn(x)
         
         return x
 
@@ -207,10 +250,13 @@ class EfficientTransformer(nn.Module):
             for _ in range(num_layers)
         ])
         self.norm = nn.LayerNorm(hidden_size)
+        self.num_layers = num_layers
         
     def forward(self, x):
-        for layer in self.layers:
-            x = layer(x)
+        for i, layer in enumerate(self.layers):
+            # Always optimize the last layer by only computing CLS token attention
+            cls_attention_only = (i == self.num_layers - 1)
+            x = layer(x, cls_attention_only=cls_attention_only)
         return self.norm(x)
 
 class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
