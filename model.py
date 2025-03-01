@@ -137,6 +137,13 @@ class EfficientTransformerBlock(nn.Module):
             self.v_proj = nn.Linear(hidden_size, hidden_size)
             self.out_proj = nn.Linear(hidden_size, hidden_size)
             self.dropout = dropout
+            
+            # Use torchtune RoPE
+            if XFORMERS_AVAILABLE:
+                from torchtune.modules import RotaryPositionalEmbeddings
+                self.rotary_emb = RotaryPositionalEmbeddings(self.head_dim)
+            else:
+                self.rotary_emb = None
         else:
             self.self_attn = nn.MultiheadAttention(hidden_size, num_heads, dropout=dropout, batch_first=True)
         
@@ -154,13 +161,19 @@ class EfficientTransformerBlock(nn.Module):
         x = self.norm1(x)
         
         if self.use_xformers:
-            # Simple xformers implementation - always force CUDA
+            # Simple xformers implementation with rotary embeddings
             batch_size, seq_len, _ = x.size()
             
             # Project to queries, keys, values
             q = self.q_proj(x).reshape(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
             k = self.k_proj(x).reshape(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
             v = self.v_proj(x).reshape(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+            
+            # Apply rotary embeddings if available
+            if self.rotary_emb is not None:
+                # Apply xformers rotary embeddings
+                q = self.rotary_emb(q)
+                k = self.rotary_emb(k)
             
             # Apply xformers memory-efficient attention
             attn_output = xops.memory_efficient_attention(
@@ -201,114 +214,99 @@ class EfficientTransformer(nn.Module):
         return self.norm(x)
 
 class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
-    def __init__(self, size, num_classes, classifier_type, cls_option="both", dropout_rate=0.0, use_classifier=True):
+    def __init__(self, size, num_classes, classifier_type, cls_option="patches_only", dropout_rate=0.0):
         super().__init__(size, num_classes, classifier_type)
         self.cls_option = cls_option
-        self.use_classifier = use_classifier
         
-        # Determine input dimensions
-        if not use_classifier and cls_option in ["patches_only", "both"]:
-            # Use raw DinoV2 outputs (768 or 1024 dim)
-            patch_dim = self.dinov2_config.hidden_size
-        elif use_classifier and cls_option in ["patches_only", "both"]:
-            # Use classifier reduced dimension
-            patch_dim = self.classifier.feature_size
-        else:
-            patch_dim = 0
+        # DinoV2 embedding dimension
+        self.embed_dim = self.dinov2_config.hidden_size  # 768 for DinoV2
             
-        cls_dim = self.dinov2_config.hidden_size if cls_option in ["cls_only", "both"] else 0
-        
-        # Total input dimension
-        input_dim = patch_dim + cls_dim
-        
-        # Transformer configuration
-        self.transformer_dim = 512
-        self.num_heads = 8
+        # Transformer parameters - align with embedding dimension
+        self.num_heads = 12  # 768/12 = 64 head_dim
         self.num_layers = 4
         
-        # Projection layer (if needed)
-        self.projection = nn.Linear(input_dim, self.transformer_dim) if input_dim != self.transformer_dim else nn.Identity()
+        # Calculate exact context length based on patches and frames
+        self.patches_per_frame = 13 * 18  # 234 patches per frame
+        self.max_frames = 3
         
-        # Positional encoding
-        self.register_buffer(
-            "pos_embedding", 
-            self.get_positional_embeddings(100, self.transformer_dim)
-        )
+        # Set context length based on configuration
+        if cls_option == "patches_only":
+            # All patches + 1 CLS token
+            self.context_length = self.patches_per_frame * self.max_frames + 1
+        else:  # "both"
+            # All patches + frame CLS tokens + 1 learnable CLS token
+            self.context_length = self.patches_per_frame * self.max_frames + self.max_frames + 1
         
-        # Efficient transformer without dropout
+        # Learnable CLS token
+        self.cls_token = nn.Parameter(torch.randn(1, 1, self.embed_dim))
+        
+        # Transformer encoder with xformers
         self.transformer = EfficientTransformer(
-            hidden_size=self.transformer_dim,
+            hidden_size=self.embed_dim,
             num_heads=self.num_heads,
             num_layers=self.num_layers,
-            dropout=dropout_rate
+            dropout=dropout_rate,
+            use_xformers=True  # Ensure xformers is used
         )
         
-        # Simplified classification head - just a single linear projection
-        self.fc_head = nn.Linear(self.transformer_dim, num_classes)
+        # Classification head
+        self.fc_head = nn.Linear(self.embed_dim, num_classes)
 
-    def get_positional_embeddings(self, seq_len, dim):
-        """Return positional embeddings."""
-        position = torch.arange(seq_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, dim, 2) * (-math.log(10000.0) / dim))
-        pos_embedding = torch.zeros(seq_len, dim)
-        pos_embedding[:, 0::2] = torch.sin(position * div_term)
-        pos_embedding[:, 1::2] = torch.cos(position * div_term)
-        return pos_embedding
-        
     def forward(self, x, labels=None):
         batch_size, seq_len, channels, height, width = x.shape
         
-        # Process all frames at once through DinoV2
+        # Process all frames through DinoV2
         x_reshaped = x.reshape(-1, channels, height, width)
-        out = self.dinov2(x_reshaped)
+        with torch.no_grad():  # Optionally freeze DinoV2 for efficiency
+            out = self.dinov2(x_reshaped)
         hidden_states = out.last_hidden_state
+        patches = hidden_states[:, 1:, :]   # [batch*seq_len, num_patches, hidden_dim] (excluding cls token)
+        if self.cls_option == "patches_only":
+            
+            # Reshape to [batch, seq_len*num_patches, hidden_dim]
+            num_patches = patches.size(1)
+            patches = patches.reshape(batch_size, seq_len * num_patches, -1)
+            
+            # Add learnable CLS token
+            cls_tokens = self.cls_token.expand(batch_size, -1, -1)
+            sequence = torch.cat([cls_tokens, patches], dim=1)
+            
+        else:  # "both"
+            # Get both CLS tokens and patches
+            cls_tokens = hidden_states[:, 0, :].reshape(batch_size, seq_len, -1)
+            patches = hidden_states[:, 1:, :].reshape(batch_size, seq_len * patches.size(1), -1)
+            
+            # Add learnable CLS token
+            learnable_cls = self.cls_token.expand(batch_size, -1, -1)
+            sequence = torch.cat([learnable_cls, cls_tokens, patches], dim=1)
         
-        # Choose features based on configuration
-        features_list = []
+        # Apply transformer (rotary embeddings are handled internally)
+        transformer_output = self.transformer(sequence)
         
-        if self.cls_option in ["cls_only", "both"]:
-            # Get CLS token features
-            cls_features = hidden_states[:, 0, :].reshape(batch_size, seq_len, -1)
-            features_list.append(cls_features)
+        # Use first token (CLS) for classification
+        cls_output = transformer_output[:, 0]
         
-        if self.cls_option in ["patches_only", "both"]:
-            patches = hidden_states[:, 1:, :]
-            if self.use_classifier:
-                # Use classifier to reduce dimension
-                processed_patches = self.classifier(patches)
-                processed_patches = processed_patches.reshape(batch_size, seq_len, -1)
-                features_list.append(processed_patches)
-            else:
-                # Use raw patch embeddings (mean pooling across patches)
-                raw_patches = patches.mean(dim=1).reshape(batch_size, seq_len, -1)
-                features_list.append(raw_patches)
-        
-        # Combine features
-        combined_features = torch.cat(features_list, dim=-1) if len(features_list) > 1 else features_list[0]
-        
-        # Project to transformer dimension if needed
-        features = self.projection(combined_features)
-        
-        # Add positional encoding
-        pos_emb = self.pos_embedding[:seq_len].unsqueeze(0)
-        features = features + pos_emb
-        
-        # Apply transformer
-        transformer_output = self.transformer(features)
-        
-        # Use last token representation for classification
-        last_state = transformer_output[:, -1]
-        
-        # Classification
-        logits = self.fc_head(last_state)
+        # Final classification
+        logits = self.fc_head(cls_output)
         
         # Calculate loss if labels provided
         loss = None
         if labels is not None:
-            last_label = labels[:, -1, :]
-            loss = self.loss_fct(logits.view(-1, self.num_classes), last_label.view(-1, self.num_classes))
+            if self.classifier_type == "bce":
+                if labels.dim() == 3:  # Sequence of labels
+                    last_label = labels[:, -1, :]
+                    loss = self.loss_fct(logits, last_label)
+                else:
+                    loss = self.loss_fct(logits, labels)
+            else:  # CrossEntropy
+                if labels.dim() > 1:  # Sequence of labels
+                    last_label = labels[:, -1]
+                    loss = self.loss_fct(logits, last_label)
+                else:
+                    loss = self.loss_fct(logits, labels)
             
         return logits, loss
 
     def get_classifier(self):
-        return TransferNetworkRNN(self.dinov2_config.hidden_size, 18, 13)
+        # No longer used in our implementation
+        return None
