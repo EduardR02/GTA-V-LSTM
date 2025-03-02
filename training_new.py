@@ -23,7 +23,7 @@ print(torch.version.cuda)
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 out_dir = os.path.join('models', 'test')
-eval_interval = 500
+eval_interval = 10
 log_interval = 1
 eval_iters = 10
 eval_only = False # if True, script exits right after the first eval
@@ -116,6 +116,13 @@ def load_model(sample_only=False):
         checkpoint = torch.load(ckpt_path, map_location=device)
         model = dino_model(dino_size, len(id2label), classifier_type=classifier_type, cls_option=cls_option)
         state_dict = checkpoint['model']
+
+        # added back in from nanogpt, apparently torch compile adds this
+        unwanted_prefix = '_orig_mod.'
+        for k,v in list(state_dict.items()):
+            if k.startswith(unwanted_prefix):
+                state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+
         model.load_state_dict(state_dict, strict=False)
         iter_num = checkpoint['iter_num']
         iter_num_on_load = iter_num
@@ -136,7 +143,7 @@ def load_model(sample_only=False):
 
     # freeze or unfreeze model
     for name, param in model.named_parameters():
-        if name.startswith("dinov2"):
+        if "dinov2" in name:
             param.requires_grad = fine_tune
         if sequence_len > 1 and freeze_non_dino_layers and "classifier" in name and "layer_norm" not in name:
             param.requires_grad = False
@@ -327,7 +334,8 @@ def train_loop():
             if losses_and_accs['val'] < best_val_loss or always_save_checkpoint:
                 best_val_loss = losses_and_accs['val'] if losses_and_accs['val'] < best_val_loss else best_val_loss
                 if iter_num > 0:
-                    state_dict = model.state_dict() if fine_tune else {k: v for k, v in model.state_dict().items() if not k.startswith("dinov2")}
+                    # torch.compile prepends stuff to the name!!! (_orig_mod.), so can't use startswith, but need to use "in"
+                    state_dict = model.state_dict() if fine_tune else {k: v for k, v in model.state_dict().items() if not "dinov2" in k}
                     checkpoint = {
                         'model': state_dict,
                         'optimizer': optimizer.state_dict(),
