@@ -162,18 +162,14 @@ class EfficientTransformerBlock(nn.Module):
             cls_token = x[:, 0:1]  # [batch, 1, hidden]
             
             # For CLS-only attention, only compute q for CLS token, but k,v for all tokens
-            q_cls = self.q_proj(norm_x[:, 0:1])  # Only compute q for CLS token
-            k = self.k_proj(norm_x)  # Compute k for all tokens
-            v = self.v_proj(norm_x)  # Compute v for all tokens
-            
-            # Reshape for attention computation
-            q_cls = q_cls.view(batch_size, 1, self.num_heads, self.head_dim).transpose(1, 2).contiguous()  # [B, heads, 1, head_dim]
-            k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()  # [B, heads, seq_len, head_dim]
-            v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()  # [B, heads, seq_len, head_dim]
-            
+            q_cls = self.q_proj(norm_x[:, 0:1]).view(batch_size, 1, self.num_heads, self.head_dim)  # Only compute q for CLS token
+            k = self.k_proj(norm_x).view(batch_size, seq_len, self.num_heads, self.head_dim)  # Compute k for all tokens
+            v = self.v_proj(norm_x).view(batch_size, seq_len, self.num_heads, self.head_dim)  # Compute v for all tokens
+
+            # apply rope after view and BEFORE transpose
             q_cls = self.rope(q_cls)
             k = self.rope(k)
-
+            
             # always do normal attention due to only having the single cls token that we need attention for
             attn = self.normal_attention(q_cls, k, v)
             return self.post_attention_stuff(cls_token, attn.view(batch_size, 1, hidden_size))
@@ -181,22 +177,15 @@ class EfficientTransformerBlock(nn.Module):
         # Standard attention for all tokens (non-cls-only layers)
         else:
             # Compute Q, K, V for all tokens
-            q = self.q_proj(norm_x)
-            k = self.k_proj(norm_x)
-            v = self.v_proj(norm_x)
+            q = self.q_proj(norm_x).view(batch_size, seq_len, self.num_heads, self.head_dim)
+            k = self.k_proj(norm_x).view(batch_size, seq_len, self.num_heads, self.head_dim)
+            v = self.v_proj(norm_x).view(batch_size, seq_len, self.num_heads, self.head_dim)
 
-            # Reshape for attention computation
-            q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
-            k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
-            v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
-            
-            # Apply rotary embeddings
+            # apply rope after view and BEFORE transpose
             q = self.rope(q)
             k = self.rope(k)
-            
             if self.use_xformers:
-                attn = xops.memory_efficient_attention(q, k, v, scale=self.scale)
-                attn = attn.transpose(1, 2).contiguous()
+                attn = xops.memory_efficient_attention(q, k, v, scale=self.scale1)
             else:
                 attn = self.normal_attention(q, k, v)
         
@@ -205,6 +194,9 @@ class EfficientTransformerBlock(nn.Module):
     def normal_attention(self, q, k, v):
         # Match xFormers' exact pattern of operations, https://facebookresearch.github.io/xformers/components/ops.html
         q = q * self.scale1
+        q = q.transpose(1, 2).contiguous()
+        k = k.transpose(1, 2).contiguous()
+        v = v.transpose(1, 2).contiguous()
         attn = torch.matmul(q, k.transpose(-2, -1))
         attn = F.softmax(attn, dim=-1)
         attn = torch.matmul(attn, v)
