@@ -6,4 +6,6 @@ data/
 __pycache__/
 .idea/
 *.h5
+*.sh
+training_new_h100.py
 .venv/

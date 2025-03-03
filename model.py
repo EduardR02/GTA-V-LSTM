@@ -1,8 +1,8 @@
 import torch
 from transformers import Dinov2Model, Dinov2Config
 import torch.nn as nn
-import math
 from torch.nn import functional as F
+from torchtune.modules import RotaryPositionalEmbeddings
 
 
 # Add xformers import
@@ -127,114 +127,120 @@ class EfficientTransformerBlock(nn.Module):
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.head_dim = hidden_size // num_heads
+        self.scale = float(self.head_dim ** -0.5)
         self.use_xformers = use_xformers and XFORMERS_AVAILABLE
         
-        # Self-attention
+        # Keep the same parameter initialization for both implementations
+        self.q_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.k_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.v_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.out_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.use_dropout = dropout > 0
+        if self.use_dropout:
+            self.dropout = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(hidden_size)
-        
-        if self.use_xformers:
-            self.q_proj = nn.Linear(hidden_size, hidden_size)
-            self.k_proj = nn.Linear(hidden_size, hidden_size)
-            self.v_proj = nn.Linear(hidden_size, hidden_size)
-            self.out_proj = nn.Linear(hidden_size, hidden_size)
-            self.dropout = dropout
-            
-            # Use torchtune RoPE
-            if XFORMERS_AVAILABLE:
-                from torchtune.modules import RotaryPositionalEmbeddings
-                self.rotary_emb = RotaryPositionalEmbeddings(self.head_dim, max_seq_len=max_seq_len)
-            else:
-                self.rotary_emb = None
-        else:
-            self.self_attn = nn.MultiheadAttention(hidden_size, num_heads, dropout=dropout, batch_first=True)
-        
-        # Feed-forward
         self.norm2 = nn.LayerNorm(hidden_size)
-        self.ffn = nn.Sequential(
+        self.mlp = nn.Sequential(
             nn.Linear(hidden_size, 4 * hidden_size),
             nn.GELU(),
-            nn.Linear(4 * hidden_size, hidden_size)
+            nn.Linear(4 * hidden_size, hidden_size),
         )
-
+        
+        # RoPE (Rotary Position Embedding)
+        self.rope = RotaryPositionalEmbeddings(self.head_dim, max_seq_len=max_seq_len)
+    
     def forward(self, x, cls_attention_only=False):
         # Pre-norm for attention
-        residual = x
-        x_norm = self.norm1(x)
-        batch_size = x.size(0)
+        norm_x = self.norm1(x)
+        batch_size, seq_len, hidden_size = norm_x.shape
         
-        if self.use_xformers:
-            if cls_attention_only:
-                # Extract CLS token query
-                q_cls = self.q_proj(x_norm[:, 0:1])  # [batch, 1, hidden]
-                k = self.k_proj(x_norm)              # [batch, seq, hidden]
-                v = self.v_proj(x_norm)              # [batch, seq, hidden]
-                
-                # Reshape for attention computation
-                q_cls = q_cls.view(batch_size, 1, self.num_heads, self.head_dim).transpose(1, 2)  # [batch, heads, 1, head_dim]
-                k = k.view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)         # [batch, heads, seq, head_dim]
-                v = v.view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)         # [batch, heads, seq, head_dim]
-                
-                # Apply rotary embeddings if available
-                if self.rotary_emb is not None:
-                    q_cls = self.rotary_emb(q_cls)
-                    k = self.rotary_emb(k)
-                
-                # Manual attention for CLS token only
-                attn_weights = torch.matmul(q_cls, k.transpose(-1, -2)) / math.sqrt(self.head_dim)  # [batch, heads, 1, seq]
-                attn_probs = F.softmax(attn_weights, dim=-1)
-                if self.dropout > 0:
-                    attn_probs = F.dropout(attn_probs, p=self.dropout, training=self.training)
-                
-                # Apply attention weights
-                attn_output = torch.matmul(attn_probs, v)  # [batch, heads, 1, head_dim]
-                
-                # Reshape and project
-                attn_output = attn_output.transpose(1, 2).reshape(batch_size, 1, self.hidden_size)  # [batch, 1, hidden]
-                attn_output = self.out_proj(attn_output)
-                
-                # Only add residual for CLS token and only return CLS token
-                x = residual[:, 0:1] + attn_output
-            else:
-                # Regular attention for all tokens
-                seq_len = x_norm.size(1)
-                
-                # Project to queries, keys, values
-                q = self.q_proj(x_norm).reshape(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-                k = self.k_proj(x_norm).reshape(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-                v = self.v_proj(x_norm).reshape(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-                
-                # Apply rotary embeddings if available
-                if self.rotary_emb is not None:
-                    q = self.rotary_emb(q)
-                    k = self.rotary_emb(k)
-                
-                # Apply xformers memory-efficient attention
+        # Split the computation based on cls_attention_only for better efficiency
+        if cls_attention_only:
+            # Extract just what we need - CLS token only
+            cls_token = x[:, 0:1]  # [batch, 1, hidden]
+            
+            # For CLS-only attention, only compute q for CLS token, but k,v for all tokens
+            q_cls = self.q_proj(norm_x[:, 0:1])  # Only compute q for CLS token
+            k = self.k_proj(norm_x)  # Compute k for all tokens
+            v = self.v_proj(norm_x)  # Compute v for all tokens
+            
+            # Reshape for attention computation
+            q_cls = q_cls.view(batch_size, 1, self.num_heads, self.head_dim).transpose(1, 2)  # [B, heads, 1, head_dim]
+            k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)  # [B, heads, seq_len, head_dim]
+            v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)  # [B, heads, seq_len, head_dim]
+            
+            q_cls = self.rope(q_cls)
+            k = self.rope(k)
+            
+            # Always use standard attention for CLS-only attention to avoid wasteful computation
+            attention_scores = torch.matmul(q_cls, k.transpose(-1, -2)) * (1 / self.scale)
+            attention_probs = F.softmax(attention_scores, dim=-1)
+            attn_output = torch.matmul(attention_probs, v)
+            attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, 1, hidden_size)
+            
+            # Project output and apply dropout (only for CLS token)
+            attn_output = self.out_proj(attn_output)
+
+            if self.use_dropout:
+                attn_output = self.dropout(attn_output)
+            
+            # Residual connection (only for CLS token)
+            cls_token = cls_token + attn_output
+            # Apply norm and MLP (only for CLS token)
+            mlp_out = self.mlp(self.norm2(cls_token))
+
+            if self.use_dropout:
+                mlp_out = self.dropout(mlp_out)
+
+            # residual
+            cls_token = cls_token + mlp_out
+            return cls_token
+        
+        # Standard attention for all tokens (non-cls-only layers)
+        else:
+            # Compute Q, K, V for all tokens
+            q = self.q_proj(norm_x)
+            k = self.k_proj(norm_x)
+            v = self.v_proj(norm_x)
+            
+            # Reshape for attention computation
+            q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+            k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+            v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+            
+            # Apply rotary embeddings
+            q = self.rope(q)
+            k = self.rope(k)
+            
+            if self.use_xformers:
+                # xFormers memory-efficient attention
                 attn_output = xops.memory_efficient_attention(
                     q, k, v, 
-                    attn_bias=None, 
-                    p=self.dropout,
-                    scale=float(self.head_dim ** -0.5)
+                    attn_bias=None,
+                    scale=self.scale
                 )
-                    
-                # Reshape output and project back to hidden_size
-                attn_output = attn_output.permute(0, 2, 1, 3).reshape(batch_size, seq_len, self.hidden_size)
-                x = residual + self.out_proj(attn_output)
-        else:
-            # Standard PyTorch implementation
-            if cls_attention_only:
-                # For non-xformers case, just compute attention for CLS token
-                q_cls = x_norm[:, 0:1]  # Just the CLS token
-                attn_output, _ = self.self_attn(q_cls, x_norm, x_norm)
-                x = residual[:, 0:1] + attn_output
+                attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, hidden_size)
             else:
-                attn_output, _ = self.self_attn(x_norm, x_norm, x_norm)
-                x = residual + attn_output
+                # Standard scaled dot-product attention
+                attention_scores = torch.matmul(q, k.transpose(-1, -2)) * (1 / self.scale)
+                attention_probs = F.softmax(attention_scores, dim=-1)
+                attn_output = torch.matmul(attention_probs, v)
+                attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, hidden_size)
         
-        # Feed-forward network
-        residual = x
-        x_norm = self.norm2(x)
-        x = residual + self.ffn(x_norm)
-        
+        # Common output projection
+        attn_output = self.out_proj(attn_output)
+
+        if self.use_dropout:
+            attn_output = self.dropout(attn_output)
+
+        # Residual connection and post-norm MLP
+        x = x + attn_output
+        mlp_out = self.mlp(self.norm2(x))
+
+        if self.use_dropout:
+            mlp_out = self.dropout(mlp_out)
+
+        x = x + mlp_out
         return x
 
 class EfficientTransformer(nn.Module):
@@ -255,23 +261,24 @@ class EfficientTransformer(nn.Module):
         return self.norm(x)
 
 class Dinov2ForTimeSeriesClassification(Dinov2ForClassification):
-    def __init__(self, size, num_classes, classifier_type, cls_option="patches_only", dropout_rate=0.0):
+    def __init__(self, size, num_classes, classifier_type, cls_option="patches_only", dropout_rate=0.1):
         super().__init__(size, num_classes, classifier_type)
         self.cls_option = cls_option
         
         # DinoV2 embedding dimension
         self.dino_embed_dim = self.dinov2_config.hidden_size  # 768 for DinoV2
         # Transformer parameters - keep fixed head count
-        self.num_heads = 12
-        self.num_layers = 4
+        self.num_heads = 8
+        self.num_layers = 6
         
         # Calculate exact context length based on patches and frames
         self.patches_per_frame = 13 * 18  # 234 patches per frame
         self.max_frames = 3
         
         # Determine transformer embedding dimension
-        self.use_dino_embed_size = True
-        self.transformer_dim = 256
+        self.use_dino_embed_size = False
+        self.transformer_dim = 128
+        
         if self.use_dino_embed_size or self.transformer_dim is None:
             self.embed_dim = self.dino_embed_dim
         else:
