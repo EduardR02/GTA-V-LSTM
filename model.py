@@ -12,7 +12,7 @@ try:
     print("successfully imported xformers")
 except ImportError:
     XFORMERS_AVAILABLE = False
-# XFORMERS_AVAILABLE = False    # manual xformers override in case it's numerically different
+# XFORMERS_AVAILABLE = False    # manual xformers override in case it's numerically different, should be fixed now
 
 
 class TransferNetwork(torch.nn.Module):
@@ -128,8 +128,7 @@ class EfficientTransformerBlock(nn.Module):
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.head_dim = hidden_size // num_heads
-        self.scale = float(self.head_dim ** -0.5)
-        self.scale1 = float(1 / self.scale)
+        self.scale = float(1 / (self.head_dim ** -0.5))     # xformers also requires 1/ already
         self.use_xformers = use_xformers and XFORMERS_AVAILABLE
         
         # Keep the same parameter initialization for both implementations
@@ -185,7 +184,7 @@ class EfficientTransformerBlock(nn.Module):
             q = self.rope(q)
             k = self.rope(k)
             if self.use_xformers:
-                attn = xops.memory_efficient_attention(q, k, v, scale=self.scale1)
+                attn = xops.memory_efficient_attention(q, k, v, scale=self.scale)
             else:
                 attn = self.normal_attention(q, k, v)
         
@@ -193,10 +192,10 @@ class EfficientTransformerBlock(nn.Module):
     
     def normal_attention(self, q, k, v):
         # Match xFormers' exact pattern of operations, https://facebookresearch.github.io/xformers/components/ops.html
-        q = q * self.scale1
-        q = q.transpose(1, 2).contiguous()
-        k = k.transpose(1, 2).contiguous()
-        v = v.transpose(1, 2).contiguous()
+        q = q * self.scale
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
         attn = torch.matmul(q, k.transpose(-2, -1))
         attn = F.softmax(attn, dim=-1)
         attn = torch.matmul(attn, v)
