@@ -12,6 +12,7 @@ try:
     print("successfully imported xformers")
 except ImportError:
     XFORMERS_AVAILABLE = False
+# XFORMERS_AVAILABLE = False    # manual xformers override in case it's numerically different
 
 
 class TransferNetwork(torch.nn.Module):
@@ -170,32 +171,12 @@ class EfficientTransformerBlock(nn.Module):
             k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()  # [B, heads, seq_len, head_dim]
             v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()  # [B, heads, seq_len, head_dim]
             
-            q_cls = self.rope(q_cls) * self.scale1
+            q_cls = self.rope(q_cls)
             k = self.rope(k)
-            
-            # Match xFormers' exact pattern of operations, https://facebookresearch.github.io/xformers/components/ops.html
-            attention_scores = torch.matmul(q_cls, k.transpose(-2, -1))
-            attention_probs = F.softmax(attention_scores, dim=-1)
-            attn_output = torch.matmul(attention_probs, v)
-            attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, 1, hidden_size)
-            
-            # Project output and apply dropout (only for CLS token)
-            attn_output = self.out_proj(attn_output)
 
-            if self.use_dropout:
-                attn_output = self.dropout(attn_output)
-            
-            # Residual connection (only for CLS token)
-            cls_token = cls_token + attn_output
-            # Apply norm and MLP (only for CLS token)
-            mlp_out = self.mlp(self.norm2(cls_token))
-
-            if self.use_dropout:
-                mlp_out = self.dropout(mlp_out)
-
-            # residual
-            cls_token = cls_token + mlp_out
-            return cls_token
+            # always do normal attention due to only having the single cls token that we need attention for
+            attn = self.normal_attention(q_cls, k, v)
+            return self.post_attention_stuff(cls_token, attn.view(batch_size, 1, hidden_size))
         
         # Standard attention for all tokens (non-cls-only layers)
         else:
@@ -214,36 +195,38 @@ class EfficientTransformerBlock(nn.Module):
             k = self.rope(k)
             
             if self.use_xformers:
-                # xFormers memory-efficient attention
-                attn_output = xops.memory_efficient_attention(
-                    q, k, v, 
-                    attn_bias=None,
-                    scale=self.scale
-                )
-                attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, hidden_size)
+                attn = xops.memory_efficient_attention(q, k, v, scale=self.scale)
+                attn = attn.transpose(1, 2).contiguous()
             else:
-                # Match xFormers' exact pattern of operations, https://facebookresearch.github.io/xformers/components/ops.html
-                q = q * self.scale1
-                attention_scores = torch.matmul(q, k.transpose(-2, -1))
-                attention_probs = F.softmax(attention_scores, dim=-1)
-                attn_output = torch.matmul(attention_probs, v)
-                attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, hidden_size)
+                attn = self.normal_attention(q, k, v)
         
-        # Common output projection
-        attn_output = self.out_proj(attn_output)
+        return self.post_attention_stuff(x, attn.view(batch_size, seq_len, hidden_size))
+    
+    def normal_attention(self, q, k, v):
+        # Match xFormers' exact pattern of operations, https://facebookresearch.github.io/xformers/components/ops.html
+        q = q * self.scale1
+        attn = torch.matmul(q, k.transpose(-2, -1))
+        attn = F.softmax(attn, dim=-1)
+        attn = torch.matmul(attn, v)
+        return attn.transpose(1, 2).contiguous()
+    
+    def post_attention_stuff(self, x, attn):
+        attn = self.out_proj(attn)
 
         if self.use_dropout:
-            attn_output = self.dropout(attn_output)
+            attn = self.dropout(attn)
 
         # Residual connection and post-norm MLP
-        x = x + attn_output
+        x = x + attn
         mlp_out = self.mlp(self.norm2(x))
 
         if self.use_dropout:
             mlp_out = self.dropout(mlp_out)
 
+        # residual
         x = x + mlp_out
         return x
+
 
 class EfficientTransformer(nn.Module):
     def __init__(self, hidden_size, num_heads, num_layers, dropout=0.0, use_xformers=True, max_seq_len=4096):
