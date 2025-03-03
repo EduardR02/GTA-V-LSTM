@@ -128,6 +128,7 @@ class EfficientTransformerBlock(nn.Module):
         self.num_heads = num_heads
         self.head_dim = hidden_size // num_heads
         self.scale = float(self.head_dim ** -0.5)
+        self.scale1 = float(1 / self.scale)
         self.use_xformers = use_xformers and XFORMERS_AVAILABLE
         
         # Keep the same parameter initialization for both implementations
@@ -165,15 +166,15 @@ class EfficientTransformerBlock(nn.Module):
             v = self.v_proj(norm_x)  # Compute v for all tokens
             
             # Reshape for attention computation
-            q_cls = q_cls.view(batch_size, 1, self.num_heads, self.head_dim).transpose(1, 2)  # [B, heads, 1, head_dim]
-            k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)  # [B, heads, seq_len, head_dim]
-            v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)  # [B, heads, seq_len, head_dim]
+            q_cls = q_cls.view(batch_size, 1, self.num_heads, self.head_dim).transpose(1, 2).contiguous()  # [B, heads, 1, head_dim]
+            k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()  # [B, heads, seq_len, head_dim]
+            v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()  # [B, heads, seq_len, head_dim]
             
-            q_cls = self.rope(q_cls)
+            q_cls = self.rope(q_cls) * self.scale1
             k = self.rope(k)
             
-            # Always use standard attention for CLS-only attention to avoid wasteful computation
-            attention_scores = torch.matmul(q_cls, k.transpose(-1, -2)) * (1 / self.scale)
+            # Match xFormers' exact pattern of operations, https://facebookresearch.github.io/xformers/components/ops.html
+            attention_scores = torch.matmul(q_cls, k.transpose(-2, -1))
             attention_probs = F.softmax(attention_scores, dim=-1)
             attn_output = torch.matmul(attention_probs, v)
             attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, 1, hidden_size)
@@ -202,11 +203,11 @@ class EfficientTransformerBlock(nn.Module):
             q = self.q_proj(norm_x)
             k = self.k_proj(norm_x)
             v = self.v_proj(norm_x)
-            
+
             # Reshape for attention computation
-            q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-            k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-            v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+            q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+            k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+            v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
             
             # Apply rotary embeddings
             q = self.rope(q)
@@ -221,8 +222,9 @@ class EfficientTransformerBlock(nn.Module):
                 )
                 attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, hidden_size)
             else:
-                # Standard scaled dot-product attention
-                attention_scores = torch.matmul(q, k.transpose(-1, -2)) * (1 / self.scale)
+                # Match xFormers' exact pattern of operations, https://facebookresearch.github.io/xformers/components/ops.html
+                q = q * self.scale1
+                attention_scores = torch.matmul(q, k.transpose(-2, -1))
                 attention_probs = F.softmax(attention_scores, dim=-1)
                 attn_output = torch.matmul(attention_probs, v)
                 attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, hidden_size)
