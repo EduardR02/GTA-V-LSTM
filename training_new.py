@@ -30,9 +30,10 @@ eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 fine_tune = False   # train the entire model or just the top
 freeze_non_dino_layers = False
-init_from = 'scratch' # 'scratch' or 'resume'
+init_from = 'resume' # 'scratch' or 'resume'
 dino_size = "base"  # small is ~21M, base ~86M, large ~300M, giant ~1.1B
-load_checkpoint_name = "test.pt"
+use_dino_registers = False
+load_checkpoint_name = "ckpt_transformer_128_8_6_drop_01_flip_final.pt"
 save_checkpoint_name = "test.pt"
 metrics_name = "test.png"
 gradient_accumulation_steps = 1 # used to simulate larger batch sizes
@@ -67,7 +68,7 @@ backend = 'nccl' # 'nccl', 'gloo', etc.
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 # change this to bf16 if your gpu actually supports it
 dtype = 'float16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
-compile = True # use PyTorch 2.0 to compile the model to be faster
+compile = False # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 config_dict = {k: globals()[k] for k in config_keys} # will be useful for logging
@@ -106,12 +107,12 @@ def load_model(sample_only=False):
     checkpoint = None
     if init_from == 'scratch':
         print("Initializing a new model from scratch")
-        model = Dinov2ForTimeSeriesClassification(dino_size, len(id2label), classifier_type=classifier_type, cls_option=cls_option)
+        model = Dinov2ForTimeSeriesClassification(dino_size, len(id2label), classifier_type=classifier_type, cls_option=cls_option, use_reg=use_dino_registers)
     elif init_from == 'resume':
         print(f"Resuming training from {out_dir}")
         ckpt_path = os.path.join(out_dir, load_checkpoint_name)
         checkpoint = torch.load(ckpt_path, map_location=device)
-        model = Dinov2ForTimeSeriesClassification(dino_size, len(id2label), classifier_type=classifier_type, cls_option=cls_option)
+        model = Dinov2ForTimeSeriesClassification(dino_size, len(id2label), classifier_type=classifier_type, cls_option=cls_option, use_reg=use_dino_registers)
         state_dict = checkpoint['model']
 
         # added back in from nanogpt, apparently torch compile adds this

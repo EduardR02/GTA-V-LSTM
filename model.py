@@ -143,12 +143,13 @@ class EfficientTransformer(nn.Module):
         return self.norm(x)
 
 class Dinov2ForTimeSeriesClassification(nn.Module):
-    def __init__(self, size, num_classes, classifier_type, cls_option="patches_only", dropout_rate=0.1):
+    def __init__(self, size, num_classes, classifier_type, cls_option="patches_only", use_reg=True, dropout_rate=0.1):
         super().__init__()
         self.size = size
         self.num_classes = num_classes
         self.classifier_type = classifier_type
         self.cls_option = cls_option
+        self.use_reg = use_reg
         self.return_class_token = cls_option == "both"
         self.dropout_rate = dropout_rate
         # Transformer parameters - keep fixed head count
@@ -161,9 +162,9 @@ class Dinov2ForTimeSeriesClassification(nn.Module):
         self.use_dino_embed_size = False
         self.transformer_dim = 128
 
-        self.dinov2 = torch.hub.load('facebookresearch/dinov2', f'dinov2_vit{self.size[0].lower()}14_reg')
+        self.dinov2 = torch.hub.load('facebookresearch/dinov2', f'dinov2_vit{self.size[0].lower()}14{"_reg"*self.use_reg}')
         # print(self.dinov2)
-        self.dinov2_transformer_blocks = len(self.dinov2.blocks)
+        # self.dinov2_transformer_blocks = len(self.dinov2.blocks)
         # print("BLOCKS:", self.dinov2_transformer_blocks)
         self.dinov2_embed_dim = self.dinov2.embed_dim
         
@@ -216,9 +217,9 @@ class Dinov2ForTimeSeriesClassification(nn.Module):
         
         # Process all frames through DinoV2
         x = x.reshape(-1, channels, height, width)
-        # n index starts at 1 it seems?
+        # for some reason n=1 is the last layer. n=1 default so we omit, if want to specify specific transformer block add n=, (indexing is "backwards")
         # patch should be (batch*seq_len, width*height, embed_dim) and cls (batch*seq_len, embed_dim)
-        out_tuple = self.dinov2.get_intermediate_layers(x, n=self.dinov2_transformer_blocks, reshape=False, return_class_token=self.return_class_token, norm=True)[0]
+        out_tuple = self.dinov2.get_intermediate_layers(x, reshape=False, return_class_token=self.return_class_token, norm=True)[0]
         
         # Prepare learnable CLS token
         learnable_cls = self.cls_token.expand(batch_size, 1, -1)
