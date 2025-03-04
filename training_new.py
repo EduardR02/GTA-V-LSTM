@@ -4,7 +4,7 @@ import torch
 import os
 from contextlib import nullcontext
 from dataloader import get_dataloader
-from model import Dinov2ForClassification, Dinov2ForTimeSeriesClassification
+from model import Dinov2ForTimeSeriesClassification
 import matplotlib.pyplot as plt
 import math
 import time
@@ -22,8 +22,8 @@ print(torch.version.cuda)
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
-out_dir = os.path.join('models', 'test')
-eval_interval = 10
+out_dir = os.path.join('models', 'transformer')
+eval_interval = 500
 log_interval = 1
 eval_iters = 10
 eval_only = False # if True, script exits right after the first eval
@@ -31,12 +31,12 @@ always_save_checkpoint = True # if True, always save a checkpoint after each eva
 fine_tune = False   # train the entire model or just the top
 freeze_non_dino_layers = False
 init_from = 'scratch' # 'scratch' or 'resume'
-dino_size = "base"
-load_checkpoint_name = "ckpt_transformer_12_4.pt"
-save_checkpoint_name = "ckpt_transformer_12_4.pt"
-metrics_name = "metrics_both_12_4.png"
+dino_size = "base"  # small is ~21M, base ~86M, large ~300M, giant ~1.1B
+load_checkpoint_name = "test.pt"
+save_checkpoint_name = "test.pt"
+metrics_name = "test.png"
 gradient_accumulation_steps = 1 # used to simulate larger batch sizes
-batch_size = 64    # if gradient_accumulation_steps > 1, this is the micro-batch size
+batch_size = 24    # if gradient_accumulation_steps > 1, this is the micro-batch size
 train_split = 0.95   # test val split, keep same for resume
 convert_to_greyscale = False
 sequence_len = 3
@@ -103,18 +103,15 @@ model = optimizer = scaler = None
 
 def load_model(sample_only=False):
     global model, optimizer, scaler, iter_num, best_val_loss, iter_num_on_load
-    if sequence_len > 1:
-        dino_model = Dinov2ForTimeSeriesClassification
-    else:
-        dino_model = Dinov2ForClassification
+    checkpoint = None
     if init_from == 'scratch':
         print("Initializing a new model from scratch")
-        model = dino_model(dino_size, len(id2label), classifier_type=classifier_type, cls_option=cls_option)
+        model = Dinov2ForTimeSeriesClassification(dino_size, len(id2label), classifier_type=classifier_type, cls_option=cls_option)
     elif init_from == 'resume':
         print(f"Resuming training from {out_dir}")
         ckpt_path = os.path.join(out_dir, load_checkpoint_name)
         checkpoint = torch.load(ckpt_path, map_location=device)
-        model = dino_model(dino_size, len(id2label), classifier_type=classifier_type, cls_option=cls_option)
+        model = Dinov2ForTimeSeriesClassification(dino_size, len(id2label), classifier_type=classifier_type, cls_option=cls_option)
         state_dict = checkpoint['model']
 
         # added back in from nanogpt, apparently torch compile adds this
@@ -122,7 +119,7 @@ def load_model(sample_only=False):
         for k,v in list(state_dict.items()):
             if k.startswith(unwanted_prefix):
                 state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-
+        # print({k for k, v in state_dict.items() if not 'dinov2' in k})
         model.load_state_dict(state_dict, strict=False)
         iter_num = checkpoint['iter_num']
         iter_num_on_load = iter_num
@@ -135,6 +132,9 @@ def load_model(sample_only=False):
             module.eval()
         model.to(device)
         del checkpoint
+        if compile:
+            print("compiling the model... (takes a ~minute)")
+            model = torch.compile(model)    # requires PyTorch 2.0
         torch.cuda.empty_cache()
         return model
 
