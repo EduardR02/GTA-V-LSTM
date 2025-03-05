@@ -27,6 +27,20 @@ minimap_mask_horizontally_flipped = np.fliplr(minimap_mask)
 valid_warp_label = np.array([1, 0, 0, 0], dtype=np.int8)
 min_warp_shift = 50
 max_warp_shift = 100
+jitter_p = 0.75
+
+
+class RandomSkyMask(A.ImageOnlyTransform):
+    def __init__(self, height_limit=(0.3, 0.4), p=0.5):
+        super().__init__(p=p)
+        self.height_limit = height_limit
+        
+    def apply(self, img, **params):
+        h, w, _ = img.shape
+        mask_height = int(h * random.uniform(*self.height_limit))
+        img_copy = img.copy()
+        img_copy[:mask_height, :, :] = 0
+        return img_copy
 
 
 class H5Dataset(Dataset):
@@ -44,7 +58,8 @@ class H5Dataset(Dataset):
 
         self.train_transform_with_zoom = A.Compose([
             A.Affine(scale=(1.05, 1.2), p=self.zoom_prob),
-            A.ColorJitter(p=0.5),
+            color_jitter_replace,
+            RandomSkyMask(height_limit=(0.3, 0.4), p=0.5),
         ], additional_targets=additional_targets)
 
     def _create_lookup_table(self):
@@ -283,6 +298,21 @@ def flip_image_with_minimap(image):
     return image
 
 
+color_jitter_replace = A.OneOf([
+    # Increased range to help with darker conditions (tunnels)
+    A.RandomBrightnessContrast(brightness_limit=(-0.3, 0.1), contrast_limit=(-0.1, 0.3), p=0.7),
+    
+    # Expanded gamma range to emphasize darker conditions
+    A.RandomGamma(gamma_limit=(60, 110), p=0.6),
+    
+    # Slightly increased value range for lighting variance
+    A.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=15, val_shift_limit=(-15, 5), p=0.5),
+    
+    # Slight blue shift more likely (for shadow simulation)
+    A.RGBShift(r_shift_limit=(-5, 10), g_shift_limit=(-5, 10), b_shift_limit=(0, 15), p=0.4),
+], p=jitter_p)
+
+
 # not sure about the zoom augmentation, i think it causes training to be quite a bit worse, especially
 # because I don't account for if the image has been warped already to not zoom. (easy but a bit annoying to do)
 # Define two different transforms so that we can dynamically zoom or not (because we need to account if we warped before)
@@ -290,7 +320,8 @@ additional_targets = {f'image{i}': 'image' for i in range(1, config.sequence_len
 # zoom transform moved to class so that we can control the zoom param
 
 train_transform_no_zoom = A.Compose([
-    A.ColorJitter(p=0.5),
+    color_jitter_replace,
+    RandomSkyMask(height_limit=(0.3, 0.4), p=0.5),
 ], additional_targets=additional_targets)
 
 
