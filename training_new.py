@@ -32,18 +32,19 @@ fine_tune = False   # train the entire model or just the top
 freeze_non_dino_layers = False
 init_from = 'resume' # 'scratch' or 'resume'
 dino_size = "base"  # small is ~21M, base ~86M, large ~300M, giant ~1.1B
-use_dino_registers = False
-load_checkpoint_name = "ckpt_transformer_128_8_6_drop_01_flip_final.pt"
-save_checkpoint_name = "test.pt"
-metrics_name = "test.png"
+use_dino_registers = True
+load_checkpoint_name = "temp.pt"
+save_checkpoint_name = "temp.pt"
+metrics_name = "temp.png"
 gradient_accumulation_steps = 1 # used to simulate larger batch sizes
 batch_size = 24    # if gradient_accumulation_steps > 1, this is the micro-batch size
 train_split = 0.95   # test val split, keep same for resume
 convert_to_greyscale = False
 sequence_len = 3
 sequence_stride = 20
-flip_prob = 0.2
-warp_prob = 0.2
+flip_prob = 0.4
+warp_prob = 0.05
+zoom_prob = 0.2
 classifier_type = "bce" # "cce" or "bce"
 restart_schedules = False
 cls_option = "both"    # "cls_only", "both", or "patches_only"
@@ -91,9 +92,9 @@ else:
 
 
 train_dataloader = get_dataloader(current_data_dirs, batch_size, train_split, True, classifier_type,
-                                  sequence_len, sequence_stride, flip_prob, warp_prob, shift_labels=shift_labels, shuffle=True, num_workers=num_workers)
+                                  sequence_len, sequence_stride, flip_prob, warp_prob, zoom_prob, shift_labels=shift_labels, shuffle=True, num_workers=num_workers)
 val_dataloader = get_dataloader(current_data_dirs, batch_size, train_split, False, classifier_type,
-                                sequence_len, sequence_stride, flip_prob, warp_prob, shift_labels=shift_labels, shuffle=True, num_workers=num_workers)
+                                sequence_len, sequence_stride, flip_prob, warp_prob, zoom_prob, shift_labels=shift_labels, shuffle=True, num_workers=num_workers)
 
 
 iter_num = 0

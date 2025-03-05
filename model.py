@@ -227,41 +227,33 @@ class Dinov2ForTimeSeriesClassification(nn.Module):
         # Handle sequence composition based on configuration
         if self.cls_option == "patches_only":
             # Project the patches first (linear operation only cares about last dim)
-            patches = self.projection(out_tuple)  # [batch*seq_len, patches_per_frame, embed_dim]
-            
-            # Then reshape to the correct batch dimension
-            patches = patches.reshape(batch_size, seq_len * self.patches_per_frame, self.embed_dim)
-            
-            # Concatenate with the learnable CLS token
-            sequence = torch.cat([learnable_cls, patches], dim=1)
+            # proj out is [batch*seq_len, patches_per_frame, embed_dim]
+            out = self.projection(out_tuple).reshape(batch_size, seq_len * self.patches_per_frame, self.embed_dim)
         else:  # "both"
             # out_tuple[1] shape: [batch*seq_len, dinov2_embed_dim]
             # Add dimension to match patches: [batch*seq_len, 1, dinov2_embed_dim]
             cls_tokens = out_tuple[1].unsqueeze(1)
             
             # Concatenate CLS with patches: [batch*seq_len, 1+patches_per_frame, dinov2_embed_dim]
-            combined = torch.cat([cls_tokens, out_tuple[0]], dim=1)
-            
             # Project once: [batch*seq_len, 1+patches_per_frame, embed_dim] and
             # Reshape: [batch, seq_len*(1+patches_per_frame), embed_dim]
-            combined = self.projection(combined).reshape(batch_size, seq_len * (1 + self.patches_per_frame), self.embed_dim)
-            
-            # Final sequence: [batch, 1+seq_len*(1+patches_per_frame), embed_dim]
-            sequence = torch.cat([learnable_cls, combined], dim=1)
+            out = self.projection(torch.cat([cls_tokens, out_tuple[0]], dim=1)).reshape(batch_size, seq_len * (1 + self.patches_per_frame), self.embed_dim)
+        # prepend cls to dino output
+        out = torch.cat([learnable_cls, out], dim=1)
         
         # Apply transformer
-        cls_output = self.transformer(sequence)[:, 0]  # Shape: [batch, embed_dim] (squeezes size 1 dim in between, transformer output is already only "1" size due to only outputting cls token, but we have to squeeze the dim)
+        out = self.transformer(out)[:, 0]  # Shape: [batch, embed_dim] (squeezes size 1 dim in between, transformer output is already only "1" size due to only outputting cls token, but we have to squeeze the dim)
         
-        # Final classification
-        logits = self.fc_head(cls_output)
+        # Final classification using the cls token
+        out = self.fc_head(out)
         
         # Calculate loss if labels provided
         loss = None
         if labels is not None:
             last_label = labels[:, -1, :]
-            loss = self.loss_fct(logits.view(-1, self.num_classes), last_label.view(-1, self.num_classes))
+            loss = self.loss_fct(out.view(-1, self.num_classes), last_label.view(-1, self.num_classes))
                 
-        return logits, loss
+        return out, loss
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
         # start with all of the candidate parameters

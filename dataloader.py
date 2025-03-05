@@ -30,16 +30,22 @@ max_warp_shift = 100
 
 
 class H5Dataset(Dataset):
-    def __init__(self, data_dirs, train_split, is_train, classifier_type, flip_prob, warp_prob, shift_labels=True):
+    def __init__(self, data_dirs, train_split, is_train, classifier_type, flip_prob, warp_prob, zoom_prob, shift_labels=True):
         self.train_split = train_split
         self.is_train = is_train
         self.classifier_type = classifier_type
         self.flip_prob = flip_prob
         self.warp_prob = warp_prob
+        self.zoom_prob = zoom_prob
         self.label_shift = round(config.fps_at_recording_time / config.fps_at_test_time) if shift_labels else 0
         self.transform = transform
         self.data_files = [os.path.join(data_dir, f) for data_dir in data_dirs for f in sorted(os.listdir(data_dir)) if f.endswith('.h5')]
         self.lookup_table = self._create_lookup_table()
+
+        self.train_transform_with_zoom = A.Compose([
+            A.Affine(scale=(1.05, 1.2), p=self.zoom_prob),
+            A.ColorJitter(p=0.5),
+        ], additional_targets=additional_targets)
 
     def _create_lookup_table(self):
         lookup = []
@@ -151,7 +157,8 @@ class H5Dataset(Dataset):
         minimaps = [img[y1:y2, x1:x2] for img in images]
         # for zoom we would technically need to inpaint, becuase between edge and minimap there will be the small edge
         # of the old minimap, but the performance hit is massive for some reason
-        augmented_images = train_transform(**{'image' if i == 0 else f'image{i}': img for i, img in enumerate(images)})
+        transform_to_use = train_transform_no_zoom if warped else self.train_transform_with_zoom
+        augmented_images = transform_to_use(**{'image' if i == 0 else f'image{i}': img for i, img in enumerate(images)})
         augmented_images = [augmented_images['image']] + [augmented_images[f'image{i}'] for i in range(1, len(images))]
 
         for img, minimap in zip(augmented_images, minimaps):
@@ -160,10 +167,10 @@ class H5Dataset(Dataset):
 
 
 class TimeSeriesDataset(H5Dataset):
-    def __init__(self, data_dirs, train_split, is_train, classifier_type, flip_prob, warp_prob, sequence_len, sequence_stride, shift_labels=True):
+    def __init__(self, data_dirs, train_split, is_train, classifier_type, flip_prob, warp_prob, zoom_prob, sequence_len, sequence_stride, shift_labels=True):
         self.sequence_len = sequence_len
         self.sequence_stride = sequence_stride
-        super().__init__(data_dirs, train_split, is_train, classifier_type, flip_prob, warp_prob, shift_labels)
+        super().__init__(data_dirs, train_split, is_train, classifier_type, flip_prob, warp_prob, zoom_prob, shift_labels)
 
     def __getitem__(self, idx):
         if not self.is_train:
@@ -278,9 +285,11 @@ def flip_image_with_minimap(image):
 
 # not sure about the zoom augmentation, i think it causes training to be quite a bit worse, especially
 # because I don't account for if the image has been warped already to not zoom. (easy but a bit annoying to do)
+# Define two different transforms so that we can dynamically zoom or not (because we need to account if we warped before)
 additional_targets = {f'image{i}': 'image' for i in range(1, config.sequence_len)}
-train_transform = A.Compose([
-    # A.Affine(scale=(1.05, 1.2), p=0.2),
+# zoom transform moved to class so that we can control the zoom param
+
+train_transform_no_zoom = A.Compose([
     A.ColorJitter(p=0.5),
 ], additional_targets=additional_targets)
 
@@ -293,12 +302,12 @@ transform = A.Compose([
 
 
 def get_dataloader(data_dir, batch_size, train_split, is_train, classifier_type, sequence_len=1, 
-                  sequence_stride=1, flip_prob=0., warp_prob=0., shift_labels=True, shuffle=True,
+                  sequence_stride=1, flip_prob=0., warp_prob=0., zoom_prob=0., shift_labels=True, shuffle=True,
                   num_workers=0, persistent_workers=True):
     if sequence_len > 1:
-        dataset = TimeSeriesDataset(data_dir, train_split, is_train, classifier_type, flip_prob, warp_prob, sequence_len, sequence_stride, shift_labels)
+        dataset = TimeSeriesDataset(data_dir, train_split, is_train, classifier_type, flip_prob, warp_prob, zoom_prob, sequence_len, sequence_stride, shift_labels)
     else:
-        dataset = H5Dataset(data_dir, train_split, is_train, classifier_type, flip_prob, warp_prob, shift_labels)
+        dataset = H5Dataset(data_dir, train_split, is_train, classifier_type, flip_prob, warp_prob, zoom_prob, shift_labels)
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -321,7 +330,7 @@ def test_dataloader():
     data_dirs = ['data/turns']
     sequence_len = 3
     # Test with workers
-    train_loader = get_dataloader(data_dirs, 32, 0.95, True, "bce", sequence_len, 20, 0., 0.5, True, 
+    train_loader = get_dataloader(data_dirs, 32, 0.95, True, "bce", sequence_len, 20, 0., 0.0, True, 
                                   num_workers=2)  # Try with 2 workers for testing
     # vizualize data with matplotlib until stopped
     for data, label in train_loader:
